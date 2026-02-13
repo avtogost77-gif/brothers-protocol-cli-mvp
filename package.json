@@ -1,0 +1,30 @@
+{
+  "name": "brothers-protocol-cli-mvp",
+  "version": "0.1.0",
+  "main": "dist/cli.js",
+  "directories": {
+    "test": "tests"
+  },
+  "scripts": {
+    "test": "npm run build && node --test tests/*.test.mjs",
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsx src/cli.ts"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "Brothers Protocol CLI MVP",
+  "private": "false",
+  "type": "module",
+  "bin": {
+    "brothers": "dist/cli.js"
+  },
+  "dependencies": {
+    "commander": "^14.0.1"
+  },
+  "devDependencies": {
+    "@types/node": "^24.3.0",
+    "tsx": "^4.20.5",
+    "typescript": "^5.9.2"
+  }
+}
