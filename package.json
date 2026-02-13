@@ -8,7 +8,8 @@
   "scripts": {
     "test": "npm run build && node --test tests/*.test.mjs",
     "build": "tsc -p tsconfig.json",
-    "dev": "tsx src/cli.ts"
+    "dev": "tsx src/cli.ts",
+    "smoke": "npm run build && bash scripts/smoke.sh"
   },
   "keywords": [],
   "author": "",
