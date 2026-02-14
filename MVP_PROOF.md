@@ -20,9 +20,11 @@ ok 1 - MVP flow: init -> task -> start -> report -> status -> next
 ok 2 - Relay flow: dependency requires baton + json endpoints
 # Subtest: Auto mode: mock provider creates report from AI response
 ok 3 - Auto mode: mock provider creates report from AI response
-1..3
-# tests 3
-# pass 3
+# Subtest: AI setup defaults + sanitize + retry backoff in auto mode
+ok 4 - AI setup defaults + sanitize + retry backoff in auto mode
+1..4
+# tests 4
+# pass 4
 # fail 0
 ```
 
@@ -52,6 +54,8 @@ Task TASK-002 started
 Baton verified: BATON-001
 BATON: BATON-001
 Auto mode enabled: sending prompt to AI...
+AI attempt 1 failed
+Retrying in 1ms...
 Auto report created: REPORT-002
 ```
 

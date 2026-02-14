@@ -5,7 +5,7 @@ import path from 'node:path';
 import { Command } from 'commander';
 
 const program = new Command();
-const VERSION = '0.3.0';
+const VERSION = '0.4.0';
 
 type TaskStatus = 'CREATED' | 'IN_PROGRESS' | 'COMPLETED' | 'BLOCKED';
 
@@ -13,6 +13,10 @@ type Config = {
   project: string;
   version: string;
   ai_provider: string;
+  ai_model: string;
+  auto_sanitize_prompt: boolean;
+  ai_retries: number;
+  ai_retry_delay_ms: number;
   coordination_dir: string;
   auto_commit: boolean;
   task_prefix: string;
@@ -49,7 +53,11 @@ type ParsedAiReport = {
 const DEFAULT_CONFIG: Config = {
   project: path.basename(process.cwd()),
   version: '1.0.0',
-  ai_provider: 'auto',
+  ai_provider: 'manual',
+  ai_model: '',
+  auto_sanitize_prompt: true,
+  ai_retries: 2,
+  ai_retry_delay_ms: 800,
   coordination_dir: './coordination',
   auto_commit: false,
   task_prefix: 'TASK',
@@ -88,6 +96,13 @@ function splitList(raw: string | undefined, separators: RegExp = /[;,]/): string
     .filter(Boolean);
 }
 
+function boolFromMode(mode: string | undefined, fallback: boolean): boolean {
+  if (!mode || mode === 'auto') return fallback;
+  if (mode === 'on' || mode === 'true' || mode === '1') return true;
+  if (mode === 'off' || mode === 'false' || mode === '0') return false;
+  throw new Error(`Invalid mode: ${mode}. Expected on|off|auto`);
+}
+
 function findProjectRoot(startDir: string): string {
   let current = path.resolve(startDir);
   while (true) {
@@ -109,6 +124,10 @@ function loadConfig(root: string): Config {
   }
   const parsed = JSON.parse(fs.readFileSync(configPath, 'utf-8')) as Partial<Config>;
   return { ...DEFAULT_CONFIG, ...parsed };
+}
+
+function saveConfig(root: string, config: Config): void {
+  writeText(path.join(root, '.brothers-config.json'), `${JSON.stringify(config, null, 2)}\n`);
 }
 
 function coordinationRoot(root: string, config: Config): string {
@@ -170,7 +189,6 @@ function extractAnySection(content: string, sectionTitles: string[]): string {
 
 function parseChecklistItems(section: string): string[] {
   if (!section) return [];
-
   const lines = section
     .split('\n')
     .map((line) => line.trim())
@@ -181,7 +199,6 @@ function parseChecklistItems(section: string): string[] {
     const checklist = line.match(/^[-*]\s*(?:✅|\[x\]|\[X\])\s*(.+)$/);
     const bullet = line.match(/^[-*]\s*(?:\[\s\]|\[x\]|\[X\])?\s*(.+)$/);
     const numeric = line.match(/^\d+\.\s+(.+)$/);
-
     if (checklist) items.push(checklist[1].trim());
     else if (bullet) items.push(bullet[1].trim());
     else if (numeric) items.push(numeric[1].trim());
@@ -204,9 +221,7 @@ function parseDependencies(taskContent: string): string[] {
     if (/^none$/i.test(line)) continue;
     const bullet = line.match(/^[-*]\s*(.+)$/);
     const value = bullet ? bullet[1].trim() : line;
-    if (/^TASK-\d+$/i.test(value)) {
-      deps.push(value.toUpperCase());
-    }
+    if (/^TASK-\d+$/i.test(value)) deps.push(value.toUpperCase());
   }
 
   return Array.from(new Set(deps));
@@ -283,12 +298,10 @@ function extractTaskTitle(taskContent: string): string {
 
 function getLatestReportFiles(reportsDir: string, count: number): string[] {
   if (!fs.existsSync(reportsDir)) return [];
-
   const files = fs
     .readdirSync(reportsDir)
     .filter((name) => /^REPORT-\d+\.md$/.test(name))
     .sort((a, b) => a.localeCompare(b));
-
   return files.slice(-count).map((name) => path.join(reportsDir, name));
 }
 
@@ -311,7 +324,7 @@ function setupProject(root: string, projectName: string): void {
     project: projectName,
   };
 
-  writeText(path.join(root, '.brothers-config.json'), `${JSON.stringify(config, null, 2)}\n`);
+  saveConfig(root, config);
 
   writeText(
     path.join(coordination, 'templates', 'task-template.md'),
@@ -453,7 +466,6 @@ function findLatestReportForTask(
     const content = fs.readFileSync(reportPath, 'utf-8');
     const section = extractSection(content, 'TASK');
     const linkedTask = section.split('\n')[0]?.trim();
-
     if (linkedTask === taskId) {
       const reportId = path.basename(reportPath, '.md');
       return { reportId, reportPath, reportContent: content };
@@ -476,12 +488,7 @@ function parseChangedFiles(reportContent: string): string[] {
   for (const line of lines) {
     const bullet = line.match(/^[-*]\s+(.+)$/);
     if (!bullet) continue;
-
-    const candidate = bullet[1]
-      .replace(/^`|`$/g, '')
-      .replace(/\s+\(.*\)$/, '')
-      .trim();
-
+    const candidate = bullet[1].replace(/^`|`$/g, '').replace(/\s+\(.*\)$/, '').trim();
     if (!candidate || /^not specified$/i.test(candidate)) continue;
     files.push(candidate);
   }
@@ -603,12 +610,8 @@ function verifyBatonForTask(
 ): RelayBaton {
   const baton = loadBaton(coordination, batonId);
 
-  if (!baton.passed) {
-    throw new Error(`Baton ${batonId} is not passed`);
-  }
-  if (baton.toTask !== taskId) {
-    throw new Error(`Baton ${batonId} is for ${baton.toTask}, not ${taskId}`);
-  }
+  if (!baton.passed) throw new Error(`Baton ${batonId} is not passed`);
+  if (baton.toTask !== taskId) throw new Error(`Baton ${batonId} is for ${baton.toTask}, not ${taskId}`);
 
   const batonDeps = baton.dependencies.map((dep) => dep.taskId).sort();
   const taskDeps = [...dependencies].sort();
@@ -692,6 +695,25 @@ ${nextSteps}
   return { reportId, reportPath };
 }
 
+function sanitizePrompt(raw: string): string {
+  const replacements: Array<[RegExp, string]> = [
+    [/ghp_[A-Za-z0-9]{20,}/g, '[REDACTED_GITHUB_TOKEN]'],
+    [/sk-[A-Za-z0-9_-]{16,}/g, '[REDACTED_API_KEY]'],
+    [/AKIA[0-9A-Z]{16}/g, '[REDACTED_AWS_KEY]'],
+    [/AIza[0-9A-Za-z-_]{20,}/g, '[REDACTED_GOOGLE_KEY]'],
+    [/(password\s*[:=]\s*)[^\s\n]+/gi, '$1[REDACTED_PASSWORD]'],
+    [/(token\s*[:=]\s*)[^\s\n]+/gi, '$1[REDACTED_TOKEN]'],
+    [/(api[_-]?key\s*[:=]\s*)[^\s\n]+/gi, '$1[REDACTED_API_KEY]'],
+    [/(authorization\s*:\s*bearer\s+)[^\s\n]+/gi, '$1[REDACTED_BEARER]'],
+  ];
+
+  let sanitized = raw;
+  for (const [pattern, replacement] of replacements) {
+    sanitized = sanitized.replace(pattern, replacement);
+  }
+  return sanitized;
+}
+
 function defaultMockAiResponse(): string {
   return `## WORK DONE
 - ✅ Implemented requested changes
@@ -713,9 +735,7 @@ Task completed in mock mode.
 
 async function callOpenAI(prompt: string, model: string): Promise<string> {
   const apiKey = process.env.OPENAI_API_KEY;
-  if (!apiKey) {
-    throw new Error('OPENAI_API_KEY is not set');
-  }
+  if (!apiKey) throw new Error('OPENAI_API_KEY is not set');
 
   const response = await fetch('https://api.openai.com/v1/chat/completions', {
     method: 'POST',
@@ -741,23 +761,16 @@ async function callOpenAI(prompt: string, model: string): Promise<string> {
     throw new Error(`OpenAI request failed (${response.status}): ${text}`);
   }
 
-  const data = await response.json() as {
-    choices?: Array<{ message?: { content?: string } }>;
-  };
-
+  const data = await response.json() as { choices?: Array<{ message?: { content?: string } }> };
   const content = data.choices?.[0]?.message?.content;
-  if (!content) {
-    throw new Error('OpenAI response does not contain message content');
-  }
+  if (!content) throw new Error('OpenAI response does not contain message content');
 
   return content;
 }
 
 async function callAnthropic(prompt: string, model: string): Promise<string> {
   const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) {
-    throw new Error('ANTHROPIC_API_KEY is not set');
-  }
+  if (!apiKey) throw new Error('ANTHROPIC_API_KEY is not set');
 
   const response = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
@@ -779,41 +792,62 @@ async function callAnthropic(prompt: string, model: string): Promise<string> {
     throw new Error(`Anthropic request failed (${response.status}): ${text}`);
   }
 
-  const data = await response.json() as {
-    content?: Array<{ type?: string; text?: string }>;
-  };
-
+  const data = await response.json() as { content?: Array<{ type?: string; text?: string }> };
   const content = (data.content ?? [])
     .filter((part) => part.type === 'text' && typeof part.text === 'string')
     .map((part) => part.text as string)
     .join('\n');
 
-  if (!content) {
-    throw new Error('Anthropic response does not contain text content');
-  }
-
+  if (!content) throw new Error('Anthropic response does not contain text content');
   return content;
 }
 
-async function callAiProvider(provider: string, prompt: string, model?: string): Promise<string> {
+async function callAiProvider(provider: string, prompt: string, model: string | undefined, attempt: number): Promise<string> {
   const normalized = provider.toLowerCase();
 
   if (normalized === 'mock') {
+    const failCount = Number(process.env.BROTHERS_MOCK_FAILS || '0');
+    if (attempt <= failCount) {
+      throw new Error(`Mock provider forced failure on attempt ${attempt}/${failCount}`);
+    }
     return process.env.BROTHERS_MOCK_AI_RESPONSE || defaultMockAiResponse();
   }
 
-  if (normalized === 'openai') {
-    return callOpenAI(prompt, model || 'gpt-4.1-mini');
+  if (normalized === 'openai') return callOpenAI(prompt, model || 'gpt-4.1-mini');
+  if (normalized === 'anthropic' || normalized === 'claude') return callAnthropic(prompt, model || 'claude-3-5-sonnet-latest');
+
+  throw new Error(`Unsupported AI provider for --auto: ${provider}. Use one of: mock, openai, anthropic`);
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function callAiWithRetry(
+  provider: string,
+  prompt: string,
+  model: string | undefined,
+  retries: number,
+  retryDelayMs: number,
+): Promise<string> {
+  let lastError: unknown;
+  const maxAttempts = Math.max(1, retries + 1);
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      return await callAiProvider(provider, prompt, model, attempt);
+    } catch (error) {
+      lastError = error;
+      if (attempt >= maxAttempts) break;
+
+      console.log(`AI attempt ${attempt} failed: ${(error as Error).message}`);
+      const delay = retryDelayMs * attempt;
+      console.log(`Retrying in ${delay}ms...`);
+      await sleep(delay);
+    }
   }
 
-  if (normalized === 'anthropic' || normalized === 'claude') {
-    return callAnthropic(prompt, model || 'claude-3-5-sonnet-latest');
-  }
-
-  throw new Error(
-    `Unsupported AI provider for --auto: ${provider}. ` +
-    `Use one of: mock, openai, anthropic`,
-  );
+  throw new Error(`AI provider failed after ${maxAttempts} attempts: ${(lastError as Error).message}`);
 }
 
 function parseAiResponse(raw: string): ParsedAiReport {
@@ -867,6 +901,85 @@ program
 
     console.log(`Initialized Brothers Protocol project at: ${root}`);
     console.log('Created: coordination/tasks, coordination/reports, coordination/templates, coordination/batons, .brothers-config.json');
+  });
+
+const ai = program.command('ai').description('Configure AI provider defaults');
+
+ai
+  .command('providers')
+  .description('List supported auto providers')
+  .action(() => {
+    console.log('Supported providers:');
+    console.log('- mock');
+    console.log('- openai');
+    console.log('- anthropic');
+  });
+
+ai
+  .command('show')
+  .description('Show AI configuration')
+  .action(() => {
+    const root = findProjectRoot(process.cwd());
+    const config = loadConfig(root);
+
+    console.log('AI CONFIG');
+    console.log(`provider: ${config.ai_provider}`);
+    console.log(`model: ${config.ai_model || '(default per provider)'}`);
+    console.log(`sanitize_prompt: ${config.auto_sanitize_prompt}`);
+    console.log(`retries: ${config.ai_retries}`);
+    console.log(`retry_delay_ms: ${config.ai_retry_delay_ms}`);
+  });
+
+ai
+  .command('setup')
+  .description('Set AI defaults in .brothers-config.json')
+  .option('--provider <provider>', 'manual|mock|openai|anthropic')
+  .option('--model <model>', 'Default model for --auto mode')
+  .option('--sanitize <mode>', 'on|off')
+  .option('--retries <count>', 'Retry count for auto calls')
+  .option('--retry-delay-ms <ms>', 'Base retry delay in milliseconds')
+  .action((options: { provider?: string; model?: string; sanitize?: string; retries?: string; retryDelayMs?: string }) => {
+    const root = findProjectRoot(process.cwd());
+    const config = loadConfig(root);
+
+    if (options.provider) {
+      const normalized = options.provider.toLowerCase();
+      if (!['manual', 'mock', 'openai', 'anthropic', 'claude'].includes(normalized)) {
+        throw new Error('Unsupported provider. Use manual|mock|openai|anthropic');
+      }
+      config.ai_provider = normalized === 'claude' ? 'anthropic' : normalized;
+    }
+
+    if (options.model !== undefined) config.ai_model = options.model;
+
+    if (options.sanitize !== undefined) {
+      config.auto_sanitize_prompt = boolFromMode(options.sanitize, config.auto_sanitize_prompt);
+    }
+
+    if (options.retries !== undefined) {
+      const retries = Number(options.retries);
+      if (!Number.isInteger(retries) || retries < 0 || retries > 10) {
+        throw new Error('retries must be an integer between 0 and 10');
+      }
+      config.ai_retries = retries;
+    }
+
+    if (options.retryDelayMs !== undefined) {
+      const retryDelayMs = Number(options.retryDelayMs);
+      if (!Number.isInteger(retryDelayMs) || retryDelayMs < 0 || retryDelayMs > 60000) {
+        throw new Error('retry-delay-ms must be an integer between 0 and 60000');
+      }
+      config.ai_retry_delay_ms = retryDelayMs;
+    }
+
+    saveConfig(root, config);
+
+    console.log('AI config updated');
+    console.log(`provider: ${config.ai_provider}`);
+    console.log(`model: ${config.ai_model || '(default per provider)'}`);
+    console.log(`sanitize_prompt: ${config.auto_sanitize_prompt}`);
+    console.log(`retries: ${config.ai_retries}`);
+    console.log(`retry_delay_ms: ${config.ai_retry_delay_ms}`);
   });
 
 program
@@ -976,11 +1089,25 @@ program
   .command('start')
   .description('Start task and generate AI prompt')
   .argument('<taskId>', 'Task id, e.g. TASK-001')
-  .option('--ai <provider>', 'AI provider name', 'manual')
+  .option('--ai <provider>', 'AI provider name (manual|mock|openai|anthropic)')
+  .option('--model <model>', 'Model name for auto mode')
   .option('--with-baton <batonId>', 'Validated baton id, e.g. BATON-001')
   .option('--auto', 'Automatically send prompt to AI and create report', false)
-  .option('--model <model>', 'Model name for auto mode', '')
-  .action(async (taskId: string, options: { ai: string; withBaton?: string; auto: boolean; model: string }) => {
+  .option('--sanitize <mode>', 'auto|on|off', 'auto')
+  .option('--retries <count>', 'Override retry count for this run')
+  .option('--retry-delay-ms <ms>', 'Override base retry delay for this run')
+  .action(async (
+    taskId: string,
+    options: {
+      ai?: string;
+      model?: string;
+      withBaton?: string;
+      auto: boolean;
+      sanitize: string;
+      retries?: string;
+      retryDelayMs?: string;
+    },
+  ) => {
     const root = findProjectRoot(process.cwd());
     const config = loadConfig(root);
     const coordination = coordinationRoot(root, config);
@@ -999,35 +1126,50 @@ program
       verifyBatonForTask(coordination, taskId, dependencies, options.withBaton);
     }
 
+    const providerFromConfig = (config.ai_provider || 'manual').toLowerCase();
+    const provider = (options.ai || providerFromConfig).toLowerCase();
+    const model = options.model
+      || (!options.ai || provider === providerFromConfig ? (config.ai_model || undefined) : undefined);
+
     const rules = readTextIfExists(toAbs(root, config.rules_file));
     const conventions = readTextIfExists(toAbs(root, config.conventions_file));
     const latestReports = getLatestReportFiles(path.join(coordination, 'reports'), 3)
       .map((reportPath) => `\n---\nFile: ${path.basename(reportPath)}\n${fs.readFileSync(reportPath, 'utf-8')}`)
       .join('\n');
 
-    const prompt = `CONTEXT: Working with Brothers Protocol\n\nRULES:\n${rules || '[No AI_RULES.md found]'}\n\nCONVENTIONS:\n${conventions || '[No CONVENTIONS.md found]'}\n\nTASK: ${taskId}\n${taskContent}\n\nRECENT REPORTS:\n${latestReports || '[No reports yet]'}\n\nINSTRUCTION:\nComplete the task and return a report using project template.`;
+    const rawPrompt = `CONTEXT: Working with Brothers Protocol\n\nRULES:\n${rules || '[No AI_RULES.md found]'}\n\nCONVENTIONS:\n${conventions || '[No CONVENTIONS.md found]'}\n\nTASK: ${taskId}\n${taskContent}\n\nRECENT REPORTS:\n${latestReports || '[No reports yet]'}\n\nINSTRUCTION:\nComplete the task and return a report using project template.`;
+
+    const sanitizeEnabled = boolFromMode(options.sanitize, config.auto_sanitize_prompt);
+    const prompt = sanitizeEnabled ? sanitizePrompt(rawPrompt) : rawPrompt;
 
     const promptPath = path.join(coordination, 'prompts', `${taskId}-prompt.txt`);
     writeText(promptPath, prompt);
     updateTaskStatus(taskPath, 'IN_PROGRESS');
 
     console.log(`Task ${taskId} started`);
-    console.log(`AI provider: ${options.ai}`);
-    if (options.withBaton) {
-      console.log(`Baton verified: ${options.withBaton}`);
-    }
+    console.log(`AI provider: ${provider}`);
+    if (model) console.log(`Model: ${model}`);
+    if (options.withBaton) console.log(`Baton verified: ${options.withBaton}`);
+    console.log(`Prompt sanitized: ${sanitizeEnabled}`);
     console.log(`Prompt file: ${promptPath}`);
 
-    if (!options.auto) {
-      return;
+    if (!options.auto) return;
+
+    if (provider === 'manual') {
+      throw new Error('Auto mode requires provider mock|openai|anthropic (via --ai or brothers ai setup)');
     }
 
-    if (options.ai.toLowerCase() === 'manual') {
-      throw new Error('Auto mode requires --ai mock|openai|anthropic');
+    const retries = options.retries !== undefined ? Number(options.retries) : config.ai_retries;
+    const retryDelayMs = options.retryDelayMs !== undefined ? Number(options.retryDelayMs) : config.ai_retry_delay_ms;
+    if (!Number.isInteger(retries) || retries < 0 || retries > 10) {
+      throw new Error('retries must be integer between 0 and 10');
+    }
+    if (!Number.isInteger(retryDelayMs) || retryDelayMs < 0 || retryDelayMs > 60000) {
+      throw new Error('retry-delay-ms must be integer between 0 and 60000');
     }
 
     console.log('Auto mode enabled: sending prompt to AI...');
-    const aiResponse = await callAiProvider(options.ai, prompt, options.model || undefined);
+    const aiResponse = await callAiWithRetry(provider, prompt, model, retries, retryDelayMs);
 
     const responsePath = path.join(coordination, 'prompts', `${taskId}-response.txt`);
     writeText(responsePath, aiResponse);
@@ -1039,7 +1181,7 @@ program
       changedFiles: parsed.changedFiles,
       testsOutput: parsed.testsOutput,
       nextSteps: parsed.nextSteps,
-      executor: `${options.ai}${options.model ? `:${options.model}` : ''}`,
+      executor: `${provider}${model ? `:${model}` : ''}`,
       status: parsed.status,
       resultSummary: parsed.resultSummary,
     });
@@ -1060,14 +1202,7 @@ program
   .option('--status <status>', 'Task final status', 'COMPLETED')
   .action((
     taskId: string,
-    options: {
-      done: string;
-      files: string;
-      tests: string;
-      next: string;
-      executor: string;
-      status: string;
-    },
+    options: { done: string; files: string; tests: string; next: string; executor: string; status: string },
   ) => {
     const root = findProjectRoot(process.cwd());
     const config = loadConfig(root);
@@ -1183,4 +1318,4 @@ program
     }
   });
 
-program.parse(process.argv);
+program.parseAsync(process.argv);

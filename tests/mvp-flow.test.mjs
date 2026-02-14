@@ -111,12 +111,7 @@ test('Relay flow: dependency requires baton + json endpoints', () => {
     'Dependent task',
   ], tempRoot);
 
-  run([
-    'task',
-    'Dependent task',
-    '--depends-on',
-    'TASK-001',
-  ], tempRoot);
+  run(['task', 'Dependent task', '--depends-on', 'TASK-001'], tempRoot);
 
   const blockedStart = runFail(['start', 'TASK-002'], tempRoot);
   assert.match(blockedStart, /has dependencies/);
@@ -165,4 +160,56 @@ test('Auto mode: mock provider creates report from AI response', () => {
 
   const taskContent = fs.readFileSync(path.join(tempRoot, 'coordination', 'tasks', 'TASK-001.md'), 'utf-8');
   assert.match(taskContent, /\*Status: COMPLETED\*/);
+});
+
+test('AI setup defaults + sanitize + retry backoff in auto mode', () => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'brothers-v04-'));
+
+  run(['init'], tempRoot);
+
+  const setupOut = run([
+    'ai', 'setup',
+    '--provider', 'mock',
+    '--model', 'mock-v2',
+    '--sanitize', 'on',
+    '--retries', '3',
+    '--retry-delay-ms', '1',
+  ], tempRoot);
+  assert.match(setupOut, /AI config updated/);
+
+  const showOut = run(['ai', 'show'], tempRoot);
+  assert.match(showOut, /provider: mock/);
+  assert.match(showOut, /model: mock-v2/);
+  assert.match(showOut, /sanitize_prompt: true/);
+
+  run([
+    'task',
+    'Sensitive auto task',
+    '--details',
+    'Use api_key: sk-1234567890ABCDEFGHIJKLMN and token=ghp_1234567890ABCDEFGHIJKLMN',
+  ], tempRoot);
+
+  const mockResponse = `## STATUS\nCOMPLETED\n\n## WORK DONE\n- ✅ Done after retries\n\n## FILES CHANGED\n- coordination/tasks/TASK-001.md\n\n## TESTS\nPASS\n\n## RESULT\nOK\n\n## NEXT STEPS\n- [ ] Ship\n`;
+
+  const autoOut = run(
+    ['start', 'TASK-001', '--auto'],
+    tempRoot,
+    {
+      BROTHERS_MOCK_FAILS: '2',
+      BROTHERS_MOCK_AI_RESPONSE: mockResponse,
+    },
+  );
+
+  assert.match(autoOut, /AI provider: mock/);
+  assert.match(autoOut, /Model: mock-v2/);
+  assert.match(autoOut, /Prompt sanitized: true/);
+  assert.match(autoOut, /AI attempt 1 failed/);
+  assert.match(autoOut, /AI attempt 2 failed/);
+  assert.match(autoOut, /Auto report created: REPORT-001/);
+
+  const promptContent = fs.readFileSync(path.join(tempRoot, 'coordination', 'prompts', 'TASK-001-prompt.txt'), 'utf-8');
+  assert.doesNotMatch(promptContent, /sk-1234567890ABCDEFGHIJKLMN/);
+  assert.doesNotMatch(promptContent, /ghp_1234567890ABCDEFGHIJKLMN/);
+  assert.match(promptContent, /\[REDACTED_API_KEY\]/);
+  assert.match(promptContent, /\[REDACTED_TOKEN\]|\[REDACTED_GITHUB_TOKEN\]/);
 });

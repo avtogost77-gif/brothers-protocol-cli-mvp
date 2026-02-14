@@ -37,3 +37,9 @@
 - Auto-generate report directly from AI output
 - Add machine-readable outputs: `relay-check --json`, `baton-info --json`
 - Add tests for mock auto mode and JSON relay interfaces
+
+## Stage 8: AI Ops Hardening (v0.4)
+- Add `ai setup/show/providers` for provider/model defaults
+- Add retry/backoff controls for auto AI calls
+- Add prompt sanitization for secrets before provider calls
+- Add tests for config defaults, retry behavior, and sanitization

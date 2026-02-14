@@ -13,6 +13,7 @@ run() {
 
 run node "$ROOT_DIR/dist/cli.js" init "$TMP_DIR/project"
 cd "$TMP_DIR/project"
+run node "$ROOT_DIR/dist/cli.js" ai setup --provider mock --model mock-v1 --sanitize on --retries 2 --retry-delay-ms 1
 
 run node "$ROOT_DIR/dist/cli.js" task "Smoke: handoff flow" --priority high --assignee claude --details "Validate full cycle" --files "src/cli.ts,tests/mvp-flow.test.mjs"
 run node "$ROOT_DIR/dist/cli.js" start TASK-001 --ai claude
@@ -46,6 +47,6 @@ Auto path verified.
 EOF_MOCK
 )"
 
-run env BROTHERS_MOCK_AI_RESPONSE="$MOCK_RESPONSE" node "$ROOT_DIR/dist/cli.js" start TASK-003 --ai mock --auto --model mock-v1
+run env BROTHERS_MOCK_FAILS=1 BROTHERS_MOCK_AI_RESPONSE="$MOCK_RESPONSE" node "$ROOT_DIR/dist/cli.js" start TASK-003 --auto
 
 echo "Smoke flow completed in: $TMP_DIR/project"
