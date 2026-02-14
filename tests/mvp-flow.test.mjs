@@ -213,3 +213,72 @@ test('AI setup defaults + sanitize + retry backoff in auto mode', () => {
   assert.match(promptContent, /\[REDACTED_API_KEY\]/);
   assert.match(promptContent, /\[REDACTED_TOKEN\]|\[REDACTED_GITHUB_TOKEN\]/);
 });
+
+test('Relay strict mode blocks warnings', () => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'brothers-strict-'));
+
+  run(['init'], tempRoot);
+  run(['task', 'Warning base task'], tempRoot);
+  run(['start', 'TASK-001'], tempRoot);
+  run([
+    'report',
+    'TASK-001',
+    '--done',
+    'Implemented with no tests',
+    '--files',
+    'coordination/tasks/TASK-001.md',
+    '--tests',
+    'Tests were not run',
+    '--next',
+    'Dependent strict task',
+  ], tempRoot);
+  run(['task', 'Dependent strict task', '--depends-on', 'TASK-001'], tempRoot);
+
+  const strictFail = runFail(['relay-check', 'TASK-002', '--strict'], tempRoot);
+  assert.match(strictFail, /strict mode failed/i);
+  assert.match(strictFail, /tests were not executed/i);
+});
+
+test('Prompt preview + dry-run + ai test command', () => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'brothers-prompt-'));
+
+  run(['init'], tempRoot);
+  run([
+    'ai', 'setup',
+    '--provider', 'mock',
+    '--model', 'mock-v3',
+    '--sanitize', 'on',
+    '--retries', '1',
+    '--retry-delay-ms', '1',
+  ], tempRoot);
+
+  const aiTestOut = run(['ai', 'test'], tempRoot, { BROTHERS_MOCK_AI_RESPONSE: 'pong' });
+  assert.match(aiTestOut, /AI test passed/);
+  assert.match(aiTestOut, /provider: mock/);
+
+  run([
+    'task',
+    'Prompt secret task',
+    '--details',
+    'api_key: sk-1234567890ABCDEFGHIJKLMN token=ghp_1234567890ABCDEFGHIJKLMN',
+  ], tempRoot);
+
+  const promptOut = run(['prompt', 'TASK-001', '--sanitize-preview', '--save'], tempRoot);
+  assert.match(promptOut, /--- RAW PROMPT ---/);
+  assert.match(promptOut, /--- SANITIZED PROMPT ---/);
+  assert.match(promptOut, /Saved prompt:/);
+
+  const savedPrompt = fs.readFileSync(path.join(tempRoot, 'coordination', 'prompts', 'TASK-001-prompt.txt'), 'utf-8');
+  assert.doesNotMatch(savedPrompt, /sk-1234567890ABCDEFGHIJKLMN/);
+  assert.doesNotMatch(savedPrompt, /ghp_1234567890ABCDEFGHIJKLMN/);
+
+  const dryRunOut = run(['start', 'TASK-001', '--dry-run'], tempRoot);
+  assert.match(dryRunOut, /dry-run completed/i);
+  assert.match(dryRunOut, /Dry run: task status unchanged/i);
+
+  const taskContent = fs.readFileSync(path.join(tempRoot, 'coordination', 'tasks', 'TASK-001.md'), 'utf-8');
+  assert.match(taskContent, /\*Status: CREATED\*/);
+
+  const responsePath = path.join(tempRoot, 'coordination', 'prompts', 'TASK-001-response.txt');
+  assert.equal(fs.existsSync(responsePath), false);
+});

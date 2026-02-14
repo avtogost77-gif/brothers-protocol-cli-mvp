@@ -24,14 +24,18 @@ git push "https://x-access-token:${GITHUB_TOKEN}@github.com/avtogost77-gif/broth
 ```bash
 node dist/cli.js init
 node dist/cli.js ai setup --provider mock --model mock-v1 --sanitize on --retries 2 --retry-delay-ms 500
+node dist/cli.js ai test
 node dist/cli.js task "Fix calculator bug" --priority high --assignee claude
+node dist/cli.js prompt TASK-001 --sanitize-preview --save
+node dist/cli.js start TASK-001 --dry-run
 node dist/cli.js start TASK-001 --ai claude
 node dist/cli.js report TASK-001 --done "Fixed selectors;Added tests" --files "index.html,assets/js/calculator.js" --tests "PASS" --next "Deploy to staging"
 node dist/cli.js task "Deploy to staging" --depends-on TASK-001
-node dist/cli.js relay-check TASK-002
+node dist/cli.js relay-check TASK-002 --strict
 node dist/cli.js start TASK-002 --with-baton BATON-001
 node dist/cli.js relay-check TASK-002 --json
 node dist/cli.js baton-info BATON-001 --json
+node dist/cli.js task "Auto follow-up"
 BROTHERS_MOCK_AI_RESPONSE="## WORK DONE\n- ✅ Auto done\n## FILES CHANGED\n- src/cli.ts\n## TESTS\nPASS\n## RESULT\nDone\n## NEXT STEPS\n- [ ] Deploy" node dist/cli.js start TASK-003 --auto
 node dist/cli.js status
 node dist/cli.js next

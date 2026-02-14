@@ -714,6 +714,23 @@ function sanitizePrompt(raw: string): string {
   return sanitized;
 }
 
+function buildPrompt(
+  root: string,
+  config: Config,
+  taskId: string,
+  taskContent: string,
+): { rawPrompt: string; sanitizedPrompt: string } {
+  const coordination = coordinationRoot(root, config);
+  const rules = readTextIfExists(toAbs(root, config.rules_file));
+  const conventions = readTextIfExists(toAbs(root, config.conventions_file));
+  const latestReports = getLatestReportFiles(path.join(coordination, 'reports'), 3)
+    .map((reportPath) => `\n---\nFile: ${path.basename(reportPath)}\n${fs.readFileSync(reportPath, 'utf-8')}`)
+    .join('\n');
+
+  const rawPrompt = `CONTEXT: Working with Brothers Protocol\n\nRULES:\n${rules || '[No AI_RULES.md found]'}\n\nCONVENTIONS:\n${conventions || '[No CONVENTIONS.md found]'}\n\nTASK: ${taskId}\n${taskContent}\n\nRECENT REPORTS:\n${latestReports || '[No reports yet]'}\n\nINSTRUCTION:\nComplete the task and return a report using project template.`;
+  return { rawPrompt, sanitizedPrompt: sanitizePrompt(rawPrompt) };
+}
+
 function defaultMockAiResponse(): string {
   return `## WORK DONE
 - ✅ Implemented requested changes
@@ -982,6 +999,64 @@ ai
     console.log(`retry_delay_ms: ${config.ai_retry_delay_ms}`);
   });
 
+ai
+  .command('test')
+  .description('Validate AI provider credentials/configuration')
+  .option('--provider <provider>', 'manual|mock|openai|anthropic')
+  .option('--model <model>', 'Model override for live test')
+  .option('--live', 'Make a real API call (openai/anthropic)', false)
+  .action(async (options: { provider?: string; model?: string; live: boolean }) => {
+    const root = findProjectRoot(process.cwd());
+    const config = loadConfig(root);
+
+    const provider = (options.provider || config.ai_provider || 'manual').toLowerCase();
+    const model = options.model || config.ai_model || undefined;
+
+    if (provider === 'manual') {
+      throw new Error('AI provider is manual. Set provider via: brothers ai setup --provider mock|openai|anthropic');
+    }
+
+    if (provider === 'mock') {
+      const response = await callAiWithRetry('mock', 'PING', model, 0, 0);
+      console.log('AI test passed');
+      console.log(`provider: ${provider}`);
+      if (model) console.log(`model: ${model}`);
+      console.log(`response_size: ${response.length}`);
+      return;
+    }
+
+    if (provider === 'openai') {
+      if (!process.env.OPENAI_API_KEY) {
+        throw new Error('OPENAI_API_KEY is not set');
+      }
+      if (!options.live) {
+        console.log('AI test passed (credentials present)');
+        console.log('provider: openai');
+        console.log('Use --live to execute an API request');
+        return;
+      }
+    }
+
+    if (provider === 'anthropic' || provider === 'claude') {
+      if (!process.env.ANTHROPIC_API_KEY) {
+        throw new Error('ANTHROPIC_API_KEY is not set');
+      }
+      if (!options.live) {
+        console.log('AI test passed (credentials present)');
+        console.log('provider: anthropic');
+        console.log('Use --live to execute an API request');
+        return;
+      }
+    }
+
+    const normalizedProvider = provider === 'claude' ? 'anthropic' : provider;
+    const response = await callAiWithRetry(normalizedProvider, 'Return exactly: PONG', model, 0, 0);
+    console.log('AI live test passed');
+    console.log(`provider: ${normalizedProvider}`);
+    if (model) console.log(`model: ${model}`);
+    console.log(`response_size: ${response.length}`);
+  });
+
 program
   .command('task')
   .description('Create a new task')
@@ -1031,22 +1106,32 @@ program
   .command('relay-check')
   .description('Validate dependency chain and issue relay baton for a task')
   .argument('<taskId>', 'Task id, e.g. TASK-002')
+  .option('--strict', 'Treat warnings as validation errors', false)
   .option('--json', 'Output JSON only', false)
-  .action((taskId: string, options: { json: boolean }) => {
+  .action((taskId: string, options: { strict: boolean; json: boolean }) => {
     const root = findProjectRoot(process.cwd());
     const config = loadConfig(root);
 
     const result = runRelayCheck(root, config, taskId);
+    const strictFailed = options.strict && result.warnings.length > 0;
 
     if (options.json) {
       console.log(JSON.stringify({
-        passed: true,
+        passed: !strictFailed,
+        strict: options.strict,
         taskId,
         batonId: result.baton.id,
         batonPath: result.batonPath,
         warnings: result.warnings,
       }, null, 2));
+      if (strictFailed) {
+        throw new Error(`Relay strict mode failed:\\n- ${result.warnings.join('\\n- ')}`);
+      }
       return;
+    }
+
+    if (strictFailed) {
+      throw new Error(`Relay strict mode failed:\\n- ${result.warnings.join('\\n- ')}`);
     }
 
     console.log(`Relay validation passed for ${taskId}`);
@@ -1086,12 +1171,47 @@ program
   });
 
 program
+  .command('prompt')
+  .description('Generate task prompt without starting execution')
+  .argument('<taskId>', 'Task id, e.g. TASK-001')
+  .option('--sanitize <mode>', 'auto|on|off', 'auto')
+  .option('--sanitize-preview', 'Show raw and sanitized prompt', false)
+  .option('--save', 'Save selected prompt to coordination/prompts', false)
+  .action((taskId: string, options: { sanitize: string; sanitizePreview: boolean; save: boolean }) => {
+    const root = findProjectRoot(process.cwd());
+    const config = loadConfig(root);
+    const coordination = coordinationRoot(root, config);
+    const tasksDir = path.join(coordination, 'tasks');
+    const { taskContent } = requireTaskContent(tasksDir, taskId);
+
+    const built = buildPrompt(root, config, taskId, taskContent);
+    const sanitizeEnabled = boolFromMode(options.sanitize, config.auto_sanitize_prompt);
+    const selectedPrompt = sanitizeEnabled ? built.sanitizedPrompt : built.rawPrompt;
+
+    if (options.sanitizePreview) {
+      console.log('--- RAW PROMPT ---');
+      console.log(built.rawPrompt);
+      console.log('--- SANITIZED PROMPT ---');
+      console.log(built.sanitizedPrompt);
+    } else {
+      console.log(selectedPrompt);
+    }
+
+    if (options.save) {
+      const promptPath = path.join(coordination, 'prompts', `${taskId}-prompt.txt`);
+      writeText(promptPath, selectedPrompt);
+      console.log(`Saved prompt: ${promptPath}`);
+    }
+  });
+
+program
   .command('start')
   .description('Start task and generate AI prompt')
   .argument('<taskId>', 'Task id, e.g. TASK-001')
   .option('--ai <provider>', 'AI provider name (manual|mock|openai|anthropic)')
   .option('--model <model>', 'Model name for auto mode')
   .option('--with-baton <batonId>', 'Validated baton id, e.g. BATON-001')
+  .option('--dry-run', 'Generate prompt only, without status change or AI call', false)
   .option('--auto', 'Automatically send prompt to AI and create report', false)
   .option('--sanitize <mode>', 'auto|on|off', 'auto')
   .option('--retries <count>', 'Override retry count for this run')
@@ -1102,6 +1222,7 @@ program
       ai?: string;
       model?: string;
       withBaton?: string;
+      dryRun: boolean;
       auto: boolean;
       sanitize: string;
       retries?: string;
@@ -1126,24 +1247,33 @@ program
       verifyBatonForTask(coordination, taskId, dependencies, options.withBaton);
     }
 
+    if (options.dryRun && options.auto) {
+      throw new Error('--dry-run cannot be combined with --auto');
+    }
+
     const providerFromConfig = (config.ai_provider || 'manual').toLowerCase();
     const provider = (options.ai || providerFromConfig).toLowerCase();
     const model = options.model
       || (!options.ai || provider === providerFromConfig ? (config.ai_model || undefined) : undefined);
 
-    const rules = readTextIfExists(toAbs(root, config.rules_file));
-    const conventions = readTextIfExists(toAbs(root, config.conventions_file));
-    const latestReports = getLatestReportFiles(path.join(coordination, 'reports'), 3)
-      .map((reportPath) => `\n---\nFile: ${path.basename(reportPath)}\n${fs.readFileSync(reportPath, 'utf-8')}`)
-      .join('\n');
-
-    const rawPrompt = `CONTEXT: Working with Brothers Protocol\n\nRULES:\n${rules || '[No AI_RULES.md found]'}\n\nCONVENTIONS:\n${conventions || '[No CONVENTIONS.md found]'}\n\nTASK: ${taskId}\n${taskContent}\n\nRECENT REPORTS:\n${latestReports || '[No reports yet]'}\n\nINSTRUCTION:\nComplete the task and return a report using project template.`;
-
+    const built = buildPrompt(root, config, taskId, taskContent);
     const sanitizeEnabled = boolFromMode(options.sanitize, config.auto_sanitize_prompt);
-    const prompt = sanitizeEnabled ? sanitizePrompt(rawPrompt) : rawPrompt;
+    const prompt = sanitizeEnabled ? built.sanitizedPrompt : built.rawPrompt;
 
     const promptPath = path.join(coordination, 'prompts', `${taskId}-prompt.txt`);
     writeText(promptPath, prompt);
+
+    if (options.dryRun) {
+      console.log(`Task ${taskId} dry-run completed`);
+      console.log(`AI provider: ${provider}`);
+      if (model) console.log(`Model: ${model}`);
+      if (options.withBaton) console.log(`Baton verified: ${options.withBaton}`);
+      console.log(`Prompt sanitized: ${sanitizeEnabled}`);
+      console.log(`Prompt file: ${promptPath}`);
+      console.log('Dry run: task status unchanged, no AI calls executed');
+      return;
+    }
+
     updateTaskStatus(taskPath, 'IN_PROGRESS');
 
     console.log(`Task ${taskId} started`);

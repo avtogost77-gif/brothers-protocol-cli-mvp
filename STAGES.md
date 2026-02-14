@@ -43,3 +43,10 @@
 - Add retry/backoff controls for auto AI calls
 - Add prompt sanitization for secrets before provider calls
 - Add tests for config defaults, retry behavior, and sanitization
+
+## Stage 9: Execution Controls (v0.5)
+- Add `ai test` command for provider readiness checks
+- Add `start --dry-run` to generate prompt without state mutation
+- Add `prompt --sanitize-preview --save` for safe handoff preview
+- Add `relay-check --strict` to treat warnings as blockers
+- Add tests for strict relay, dry-run safety, prompt preview, and ai test
