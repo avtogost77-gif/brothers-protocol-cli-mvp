@@ -1,6 +1,6 @@
 # MVP Proof of Operability
 
-Date: 2026-02-13
+Date: 2026-02-14
 
 ## 1) Automated test suite
 
@@ -16,11 +16,13 @@ Result:
 TAP version 13
 # Subtest: MVP flow: init -> task -> start -> report -> status -> next
 ok 1 - MVP flow: init -> task -> start -> report -> status -> next
-# Subtest: Relay flow: dependency requires baton
-ok 2 - Relay flow: dependency requires baton
-1..2
-# tests 2
-# pass 2
+# Subtest: Relay flow: dependency requires baton + json endpoints
+ok 2 - Relay flow: dependency requires baton + json endpoints
+# Subtest: Auto mode: mock provider creates report from AI response
+ok 3 - Auto mode: mock provider creates report from AI response
+1..3
+# tests 3
+# pass 3
 # fail 0
 ```
 
@@ -48,6 +50,9 @@ Relay validation passed for TASK-002
 Baton: BATON-001
 Task TASK-002 started
 Baton verified: BATON-001
+BATON: BATON-001
+Auto mode enabled: sending prompt to AI...
+Auto report created: REPORT-002
 ```
 
 ## 3) Private repository delivery

@@ -30,3 +30,10 @@
 - Add `relay-check` command for dependency/report/artifact validation
 - Generate relay baton JSON and enforce `start --with-baton` for dependent tasks
 - Add tests for blocked start without baton and successful start with baton
+
+## Stage 7: Auto AI Flow (v0.3)
+- Add `start --auto` mode for `mock`, `openai`, `anthropic`
+- Save raw AI response and parse into report fields
+- Auto-generate report directly from AI output
+- Add machine-readable outputs: `relay-check --json`, `baton-info --json`
+- Add tests for mock auto mode and JSON relay interfaces

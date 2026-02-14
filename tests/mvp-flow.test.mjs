@@ -8,10 +8,11 @@ import { spawnSync } from 'node:child_process';
 const repoRoot = process.cwd();
 const cliPath = path.join(repoRoot, 'dist', 'cli.js');
 
-function run(args, cwd) {
+function run(args, cwd, env = {}) {
   const result = spawnSync('node', [cliPath, ...args], {
     cwd,
     encoding: 'utf-8',
+    env: { ...process.env, ...env },
   });
 
   if (result.status !== 0) {
@@ -24,10 +25,11 @@ function run(args, cwd) {
   return result.stdout;
 }
 
-function runFail(args, cwd) {
+function runFail(args, cwd, env = {}) {
   const result = spawnSync('node', [cliPath, ...args], {
     cwd,
     encoding: 'utf-8',
+    env: { ...process.env, ...env },
   });
 
   assert.notEqual(result.status, 0, `Expected command to fail: ${args.join(' ')}`);
@@ -89,7 +91,7 @@ test('MVP flow: init -> task -> start -> report -> status -> next', () => {
   assert.ok(fs.existsSync(task2Path));
 });
 
-test('Relay flow: dependency requires baton', () => {
+test('Relay flow: dependency requires baton + json endpoints', () => {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'brothers-relay-'));
 
   run(['init'], tempRoot);
@@ -120,11 +122,47 @@ test('Relay flow: dependency requires baton', () => {
   assert.match(blockedStart, /has dependencies/);
   assert.match(blockedStart, /relay-check/);
 
-  const relayOutput = run(['relay-check', 'TASK-002'], tempRoot);
-  assert.match(relayOutput, /Relay validation passed/);
-  assert.match(relayOutput, /Baton: BATON-001/);
+  const relayJson = run(['relay-check', 'TASK-002', '--json'], tempRoot);
+  const relayData = JSON.parse(relayJson);
+  assert.equal(relayData.passed, true);
+  assert.equal(relayData.taskId, 'TASK-002');
+  assert.equal(relayData.batonId, 'BATON-001');
+
+  const batonInfoJson = run(['baton-info', 'BATON-001', '--json'], tempRoot);
+  const batonData = JSON.parse(batonInfoJson);
+  assert.equal(batonData.id, 'BATON-001');
+  assert.equal(batonData.toTask, 'TASK-002');
 
   const startWithBaton = run(['start', 'TASK-002', '--with-baton', 'BATON-001'], tempRoot);
   assert.match(startWithBaton, /Baton verified: BATON-001/);
   assert.match(startWithBaton, /Task TASK-002 started/);
+});
+
+test('Auto mode: mock provider creates report from AI response', () => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'brothers-auto-'));
+
+  run(['init'], tempRoot);
+  run(['task', 'Auto task'], tempRoot);
+
+  const mockResponse = `## STATUS\nCOMPLETED\n\n## WORK DONE\n- ✅ Added endpoint\n- ✅ Added tests\n\n## FILES CHANGED\n- coordination/tasks/TASK-001.md\n- src/api.ts\n\n## TESTS\nPASS 2 tests\n\n## RESULT\nFeature done\n\n## NEXT STEPS\n- [ ] Deploy\n`;
+
+  const autoOutput = run(
+    ['start', 'TASK-001', '--ai', 'mock', '--auto', '--model', 'mock-v1'],
+    tempRoot,
+    { BROTHERS_MOCK_AI_RESPONSE: mockResponse },
+  );
+
+  assert.match(autoOutput, /Auto mode enabled/);
+  assert.match(autoOutput, /Auto report created: REPORT-001/);
+
+  const reportPath = path.join(tempRoot, 'coordination', 'reports', 'REPORT-001.md');
+  assert.ok(fs.existsSync(reportPath));
+
+  const reportContent = fs.readFileSync(reportPath, 'utf-8');
+  assert.match(reportContent, /Added endpoint/);
+  assert.match(reportContent, /PASS 2 tests/);
+  assert.match(reportContent, /Deploy/);
+
+  const taskContent = fs.readFileSync(path.join(tempRoot, 'coordination', 'tasks', 'TASK-001.md'), 'utf-8');
+  assert.match(taskContent, /\*Status: COMPLETED\*/);
 });

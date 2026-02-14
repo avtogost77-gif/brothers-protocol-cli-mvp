@@ -5,7 +5,7 @@ import path from 'node:path';
 import { Command } from 'commander';
 
 const program = new Command();
-const VERSION = '0.2.0';
+const VERSION = '0.3.0';
 
 type TaskStatus = 'CREATED' | 'IN_PROGRESS' | 'COMPLETED' | 'BLOCKED';
 
@@ -35,6 +35,15 @@ type RelayBaton = {
   dependencies: RelayDependencyValidation[];
   checks: string[];
   passed: boolean;
+};
+
+type ParsedAiReport = {
+  status: TaskStatus;
+  doneItems: string[];
+  changedFiles: string[];
+  testsOutput: string;
+  nextSteps: string[];
+  resultSummary: string;
 };
 
 const DEFAULT_CONFIG: Config = {
@@ -108,7 +117,7 @@ function coordinationRoot(root: string, config: Config): string {
 
 function numericIdsFromFiles(dirPath: string, prefix: string, extension = '.md'): number[] {
   if (!fs.existsSync(dirPath)) return [];
-  const escapedExt = extension.replace('.', '\\.')
+  const escapedExt = extension.replace('.', '\\.');
   const matcher = new RegExp(`^${prefix}-(\\d+)${escapedExt}$`);
   return fs
     .readdirSync(dirPath)
@@ -125,6 +134,14 @@ function nextEntityId(dirPath: string, prefix: string, extension = '.md'): strin
   return `${prefix}-${String(next).padStart(3, '0')}`;
 }
 
+function normalizeTaskStatus(value: string | undefined): TaskStatus {
+  const upper = (value ?? '').toUpperCase();
+  if (upper === 'CREATED' || upper === 'IN_PROGRESS' || upper === 'COMPLETED' || upper === 'BLOCKED') {
+    return upper;
+  }
+  return 'COMPLETED';
+}
+
 function updateTaskStatus(taskPath: string, status: TaskStatus): void {
   const content = fs.readFileSync(taskPath, 'utf-8');
   const updated = content.replace(/\*Status:\s*[^*]+\*/g, `*Status: ${status}*`);
@@ -133,8 +150,7 @@ function updateTaskStatus(taskPath: string, status: TaskStatus): void {
 
 function readTaskStatus(content: string): TaskStatus {
   const match = content.match(/\*Status:\s*([A-Z_]+)\*/);
-  const status = match?.[1] as TaskStatus | undefined;
-  return status ?? 'CREATED';
+  return normalizeTaskStatus(match?.[1]);
 }
 
 function extractSection(content: string, sectionTitle: string): string {
@@ -144,9 +160,40 @@ function extractSection(content: string, sectionTitle: string): string {
   return match?.[1]?.trim() ?? '';
 }
 
+function extractAnySection(content: string, sectionTitles: string[]): string {
+  for (const title of sectionTitles) {
+    const section = extractSection(content, title);
+    if (section) return section;
+  }
+  return '';
+}
+
+function parseChecklistItems(section: string): string[] {
+  if (!section) return [];
+
+  const lines = section
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  const items: string[] = [];
+  for (const line of lines) {
+    const checklist = line.match(/^[-*]\s*(?:✅|\[x\]|\[X\])\s*(.+)$/);
+    const bullet = line.match(/^[-*]\s*(?:\[\s\]|\[x\]|\[X\])?\s*(.+)$/);
+    const numeric = line.match(/^\d+\.\s+(.+)$/);
+
+    if (checklist) items.push(checklist[1].trim());
+    else if (bullet) items.push(bullet[1].trim());
+    else if (numeric) items.push(numeric[1].trim());
+  }
+
+  return Array.from(new Set(items));
+}
+
 function parseDependencies(taskContent: string): string[] {
   const section = extractSection(taskContent, 'Dependencies');
   if (!section) return [];
+
   const lines = section
     .split('\n')
     .map((line) => line.trim())
@@ -193,6 +240,7 @@ function renderTaskMarkdown(
 ): string {
   const filesList = files.length > 0 ? files.map((file) => `- ${file}`).join('\n') : 'None';
   const depsList = dependencies.length > 0 ? dependencies.map((dep) => `- ${dep}`).join('\n') : 'None';
+
   return `# ${id}: ${title}
 
 ## Description
@@ -235,30 +283,18 @@ function extractTaskTitle(taskContent: string): string {
 
 function getLatestReportFiles(reportsDir: string, count: number): string[] {
   if (!fs.existsSync(reportsDir)) return [];
+
   const files = fs
     .readdirSync(reportsDir)
     .filter((name) => /^REPORT-\d+\.md$/.test(name))
     .sort((a, b) => a.localeCompare(b));
+
   return files.slice(-count).map((name) => path.join(reportsDir, name));
 }
 
 function parseNextSteps(reportContent: string): string[] {
-  const section = extractSection(reportContent, 'NEXT STEPS');
-  if (!section) return [];
-
-  const lines = section
-    .split('\n')
-    .map((line) => line.trim())
-    .filter(Boolean);
-
-  const steps: string[] = [];
-  for (const line of lines) {
-    const bullet = line.match(/^[-*]\s*(?:\[\s\]\s*)?(.+)$/);
-    const numeric = line.match(/^\d+\.\s+(.+)$/);
-    if (bullet) steps.push(bullet[1].trim());
-    else if (numeric) steps.push(numeric[1].trim());
-  }
-  return steps;
+  const section = extractAnySection(reportContent, ['NEXT STEPS', 'СЛЕДУЮЩИЕ ШАГИ']);
+  return parseChecklistItems(section);
 }
 
 function setupProject(root: string, projectName: string): void {
@@ -275,10 +311,7 @@ function setupProject(root: string, projectName: string): void {
     project: projectName,
   };
 
-  writeText(
-    path.join(root, '.brothers-config.json'),
-    `${JSON.stringify(config, null, 2)}\n`,
-  );
+  writeText(path.join(root, '.brothers-config.json'), `${JSON.stringify(config, null, 2)}\n`);
 
   writeText(
     path.join(coordination, 'templates', 'task-template.md'),
@@ -369,10 +402,7 @@ node dist/cli.js status
   );
 
   if (!fs.existsSync(path.join(root, 'AI_RULES.md'))) {
-    writeText(
-      path.join(root, 'AI_RULES.md'),
-      '# AI Rules\n\nAdd project-level AI execution rules here.\n',
-    );
+    writeText(path.join(root, 'AI_RULES.md'), '# AI Rules\n\nAdd project-level AI execution rules here.\n');
   }
 }
 
@@ -384,6 +414,7 @@ function createTask(
   const config = loadConfig(root);
   const coordination = coordinationRoot(root, config);
   const tasksDir = path.join(coordination, 'tasks');
+
   const id = nextEntityId(tasksDir, config.task_prefix);
   const taskPath = path.join(tasksDir, `${id}.md`);
   const content = renderTaskMarkdown(
@@ -395,6 +426,7 @@ function createTask(
     options.files,
     options.dependsOn,
   );
+
   writeText(taskPath, content);
   return { id, taskPath };
 }
@@ -411,13 +443,17 @@ function requireTaskContent(tasksDir: string, taskId: string): { taskPath: strin
   return { taskPath, taskContent: fs.readFileSync(taskPath, 'utf-8') };
 }
 
-function findLatestReportForTask(reportsDir: string, taskId: string): { reportId: string; reportPath: string; reportContent: string } | null {
+function findLatestReportForTask(
+  reportsDir: string,
+  taskId: string,
+): { reportId: string; reportPath: string; reportContent: string } | null {
   const files = getLatestReportFiles(reportsDir, Number.MAX_SAFE_INTEGER).reverse();
 
   for (const reportPath of files) {
     const content = fs.readFileSync(reportPath, 'utf-8');
     const section = extractSection(content, 'TASK');
     const linkedTask = section.split('\n')[0]?.trim();
+
     if (linkedTask === taskId) {
       const reportId = path.basename(reportPath, '.md');
       return { reportId, reportPath, reportContent: content };
@@ -428,7 +464,7 @@ function findLatestReportForTask(reportsDir: string, taskId: string): { reportId
 }
 
 function parseChangedFiles(reportContent: string): string[] {
-  const section = extractSection(reportContent, 'FILES CHANGED');
+  const section = extractAnySection(reportContent, ['FILES CHANGED', 'ИЗМЕНЁННЫЕ ФАЙЛЫ']);
   if (!section) return [];
 
   const lines = section
@@ -440,10 +476,12 @@ function parseChangedFiles(reportContent: string): string[] {
   for (const line of lines) {
     const bullet = line.match(/^[-*]\s+(.+)$/);
     if (!bullet) continue;
+
     const candidate = bullet[1]
       .replace(/^`|`$/g, '')
       .replace(/\s+\(.*\)$/, '')
       .trim();
+
     if (!candidate || /^not specified$/i.test(candidate)) continue;
     files.push(candidate);
   }
@@ -454,11 +492,13 @@ function parseChangedFiles(reportContent: string): string[] {
 function validateReportStructure(reportContent: string): string[] {
   const requiredSections = ['WORK DONE', 'FILES CHANGED', 'TESTS', 'RESULT', 'NEXT STEPS'];
   const missing: string[] = [];
+
   for (const section of requiredSections) {
     if (!extractSection(reportContent, section)) {
       missing.push(section);
     }
   }
+
   return missing;
 }
 
@@ -530,18 +570,14 @@ function runRelayCheck(root: string, config: Config, taskId: string): { baton: R
   }
 
   ensureDir(batonsDir);
+
   const batonId = nextEntityId(batonsDir, 'BATON', '.json');
   const baton: RelayBaton = {
     id: batonId,
     createdAt: nowIso(),
     toTask: taskId,
     dependencies: validatedDeps,
-    checks: [
-      'dependencies_completed',
-      'reports_exist',
-      'report_sections_valid',
-      'artifacts_exist',
-    ],
+    checks: ['dependencies_completed', 'reports_exist', 'report_sections_valid', 'artifacts_exist'],
     passed: true,
   };
 
@@ -551,18 +587,22 @@ function runRelayCheck(root: string, config: Config, taskId: string): { baton: R
   return { baton, batonPath, warnings };
 }
 
+function loadBaton(coordination: string, batonId: string): RelayBaton {
+  const batonPath = path.join(coordination, 'batons', `${batonId}.json`);
+  if (!fs.existsSync(batonPath)) {
+    throw new Error(`Baton not found: ${batonId}`);
+  }
+  return JSON.parse(fs.readFileSync(batonPath, 'utf-8')) as RelayBaton;
+}
+
 function verifyBatonForTask(
   coordination: string,
   taskId: string,
   dependencies: string[],
   batonId: string,
 ): RelayBaton {
-  const batonPath = path.join(coordination, 'batons', `${batonId}.json`);
-  if (!fs.existsSync(batonPath)) {
-    throw new Error(`Baton not found: ${batonId}. Run: brothers relay-check ${taskId}`);
-  }
+  const baton = loadBaton(coordination, batonId);
 
-  const baton = JSON.parse(fs.readFileSync(batonPath, 'utf-8')) as RelayBaton;
   if (!baton.passed) {
     throw new Error(`Baton ${batonId} is not passed`);
   }
@@ -577,6 +617,232 @@ function verifyBatonForTask(
   }
 
   return baton;
+}
+
+function createReportForTask(
+  root: string,
+  config: Config,
+  taskId: string,
+  payload: {
+    doneItems: string[];
+    changedFiles: string[];
+    testsOutput: string;
+    nextSteps: string[];
+    executor: string;
+    status: TaskStatus;
+    resultSummary?: string;
+  },
+): { reportId: string; reportPath: string } {
+  const coordination = coordinationRoot(root, config);
+  const tasksDir = path.join(coordination, 'tasks');
+  const reportsDir = path.join(coordination, 'reports');
+
+  const { taskPath, taskContent } = requireTaskContent(tasksDir, taskId);
+  const reportId = nextEntityId(reportsDir, config.report_prefix);
+  const reportPath = path.join(reportsDir, `${reportId}.md`);
+  const title = extractTaskTitle(taskContent);
+
+  const doneItems = payload.doneItems.length > 0
+    ? payload.doneItems.map((item) => `- ✅ ${item}`).join('\n')
+    : '- ✅ Implemented task';
+
+  const changedFiles = payload.changedFiles.length > 0
+    ? payload.changedFiles.map((item) => `- ${item}`).join('\n')
+    : '- Not specified';
+
+  const nextSteps = payload.nextSteps.length > 0
+    ? payload.nextSteps.map((item) => `- [ ] ${item}`).join('\n')
+    : '- [ ] Define next task';
+
+  const report = `# ${reportId}: ${title}
+
+## DATE
+${nowIso()}
+
+## EXECUTOR
+${payload.executor}
+
+## STATUS
+${payload.status}
+
+## TASK
+${taskId}
+
+## WORK DONE
+${doneItems}
+
+## FILES CHANGED
+${changedFiles}
+
+## TESTS
+\`\`\`text
+${payload.testsOutput}
+\`\`\`
+
+## RESULT
+${payload.resultSummary || `Task ${taskId} completed and documented.`}
+
+## NEXT STEPS
+${nextSteps}
+`;
+
+  writeText(reportPath, report);
+  updateTaskStatus(taskPath, payload.status);
+
+  return { reportId, reportPath };
+}
+
+function defaultMockAiResponse(): string {
+  return `## WORK DONE
+- ✅ Implemented requested changes
+- ✅ Updated related docs
+
+## FILES CHANGED
+- coordination/tasks/TASK-001.md
+
+## TESTS
+PASS mock-tests
+
+## RESULT
+Task completed in mock mode.
+
+## NEXT STEPS
+- [ ] Validate on staging
+`;
+}
+
+async function callOpenAI(prompt: string, model: string): Promise<string> {
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey) {
+    throw new Error('OPENAI_API_KEY is not set');
+  }
+
+  const response = await fetch('https://api.openai.com/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${apiKey}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      model,
+      temperature: 0.2,
+      messages: [
+        {
+          role: 'system',
+          content: 'Return a markdown report with sections: WORK DONE, FILES CHANGED, TESTS, RESULT, NEXT STEPS.',
+        },
+        { role: 'user', content: prompt },
+      ],
+    }),
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`OpenAI request failed (${response.status}): ${text}`);
+  }
+
+  const data = await response.json() as {
+    choices?: Array<{ message?: { content?: string } }>;
+  };
+
+  const content = data.choices?.[0]?.message?.content;
+  if (!content) {
+    throw new Error('OpenAI response does not contain message content');
+  }
+
+  return content;
+}
+
+async function callAnthropic(prompt: string, model: string): Promise<string> {
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) {
+    throw new Error('ANTHROPIC_API_KEY is not set');
+  }
+
+  const response = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: {
+      'x-api-key': apiKey,
+      'anthropic-version': '2023-06-01',
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({
+      model,
+      max_tokens: 3000,
+      messages: [{ role: 'user', content: prompt }],
+      system: 'Return a markdown report with sections: WORK DONE, FILES CHANGED, TESTS, RESULT, NEXT STEPS.',
+    }),
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`Anthropic request failed (${response.status}): ${text}`);
+  }
+
+  const data = await response.json() as {
+    content?: Array<{ type?: string; text?: string }>;
+  };
+
+  const content = (data.content ?? [])
+    .filter((part) => part.type === 'text' && typeof part.text === 'string')
+    .map((part) => part.text as string)
+    .join('\n');
+
+  if (!content) {
+    throw new Error('Anthropic response does not contain text content');
+  }
+
+  return content;
+}
+
+async function callAiProvider(provider: string, prompt: string, model?: string): Promise<string> {
+  const normalized = provider.toLowerCase();
+
+  if (normalized === 'mock') {
+    return process.env.BROTHERS_MOCK_AI_RESPONSE || defaultMockAiResponse();
+  }
+
+  if (normalized === 'openai') {
+    return callOpenAI(prompt, model || 'gpt-4.1-mini');
+  }
+
+  if (normalized === 'anthropic' || normalized === 'claude') {
+    return callAnthropic(prompt, model || 'claude-3-5-sonnet-latest');
+  }
+
+  throw new Error(
+    `Unsupported AI provider for --auto: ${provider}. ` +
+    `Use one of: mock, openai, anthropic`,
+  );
+}
+
+function parseAiResponse(raw: string): ParsedAiReport {
+  const statusText = extractAnySection(raw, ['STATUS', 'СТАТУС']).split('\n')[0]?.trim();
+  const status = normalizeTaskStatus(statusText);
+
+  const workSection = extractAnySection(raw, ['WORK DONE', 'ВЫПОЛНЕННЫЕ РАБОТЫ']);
+  const filesSection = extractAnySection(raw, ['FILES CHANGED', 'ИЗМЕНЁННЫЕ ФАЙЛЫ']);
+  const testsSection = extractAnySection(raw, ['TESTS', 'ТЕСТЫ']);
+  const resultSection = extractAnySection(raw, ['RESULT', 'РЕЗУЛЬТАТ']);
+  const nextStepsSection = extractAnySection(raw, ['NEXT STEPS', 'СЛЕДУЮЩИЕ ШАГИ']);
+
+  const doneItems = parseChecklistItems(workSection);
+  const changedFiles = parseChecklistItems(filesSection)
+    .map((item) => item.replace(/^`|`$/g, '').trim())
+    .filter((item) => /[\/]|\.[a-zA-Z0-9]+$/.test(item));
+  const nextSteps = parseChecklistItems(nextStepsSection);
+
+  const testsOutput = testsSection || 'No test output provided by AI response';
+  const resultSummary = resultSection || 'Auto-generated report from AI response.';
+
+  return {
+    status,
+    doneItems: doneItems.length > 0 ? doneItems : ['Implemented task according to AI response'],
+    changedFiles: Array.from(new Set(changedFiles)),
+    testsOutput,
+    nextSteps,
+    resultSummary,
+  };
 }
 
 program
@@ -614,13 +880,7 @@ program
   .option('--depends-on <taskIds>', 'Comma/semicolon separated dependencies, e.g. TASK-001,TASK-002', '')
   .action((
     title: string,
-    options: {
-      priority: string;
-      assignee: string;
-      details: string;
-      files: string;
-      dependsOn: string;
-    },
+    options: { priority: string; assignee: string; details: string; files: string; dependsOn: string },
   ) => {
     const root = findProjectRoot(process.cwd());
     const created = createTask(root, title, {
@@ -658,11 +918,23 @@ program
   .command('relay-check')
   .description('Validate dependency chain and issue relay baton for a task')
   .argument('<taskId>', 'Task id, e.g. TASK-002')
-  .action((taskId: string) => {
+  .option('--json', 'Output JSON only', false)
+  .action((taskId: string, options: { json: boolean }) => {
     const root = findProjectRoot(process.cwd());
     const config = loadConfig(root);
 
     const result = runRelayCheck(root, config, taskId);
+
+    if (options.json) {
+      console.log(JSON.stringify({
+        passed: true,
+        taskId,
+        batonId: result.baton.id,
+        batonPath: result.batonPath,
+        warnings: result.warnings,
+      }, null, 2));
+      return;
+    }
 
     console.log(`Relay validation passed for ${taskId}`);
     console.log(`Baton: ${result.baton.id}`);
@@ -674,12 +946,41 @@ program
   });
 
 program
+  .command('baton-info')
+  .description('Show relay baton details')
+  .argument('<batonId>', 'Baton id, e.g. BATON-001')
+  .option('--json', 'Output JSON only', false)
+  .action((batonId: string, options: { json: boolean }) => {
+    const root = findProjectRoot(process.cwd());
+    const config = loadConfig(root);
+    const coordination = coordinationRoot(root, config);
+
+    const baton = loadBaton(coordination, batonId);
+
+    if (options.json) {
+      console.log(JSON.stringify(baton, null, 2));
+      return;
+    }
+
+    console.log(`BATON: ${baton.id}`);
+    console.log(`Created: ${baton.createdAt}`);
+    console.log(`To task: ${baton.toTask}`);
+    console.log(`Passed: ${baton.passed ? 'yes' : 'no'}`);
+    console.log('Dependencies:');
+    for (const dep of baton.dependencies) {
+      console.log(`- ${dep.taskId} via ${dep.reportId}`);
+    }
+  });
+
+program
   .command('start')
   .description('Start task and generate AI prompt')
   .argument('<taskId>', 'Task id, e.g. TASK-001')
   .option('--ai <provider>', 'AI provider name', 'manual')
   .option('--with-baton <batonId>', 'Validated baton id, e.g. BATON-001')
-  .action((taskId: string, options: { ai: string; withBaton?: string }) => {
+  .option('--auto', 'Automatically send prompt to AI and create report', false)
+  .option('--model <model>', 'Model name for auto mode', '')
+  .action(async (taskId: string, options: { ai: string; withBaton?: string; auto: boolean; model: string }) => {
     const root = findProjectRoot(process.cwd());
     const config = loadConfig(root);
     const coordination = coordinationRoot(root, config);
@@ -716,6 +1017,35 @@ program
       console.log(`Baton verified: ${options.withBaton}`);
     }
     console.log(`Prompt file: ${promptPath}`);
+
+    if (!options.auto) {
+      return;
+    }
+
+    if (options.ai.toLowerCase() === 'manual') {
+      throw new Error('Auto mode requires --ai mock|openai|anthropic');
+    }
+
+    console.log('Auto mode enabled: sending prompt to AI...');
+    const aiResponse = await callAiProvider(options.ai, prompt, options.model || undefined);
+
+    const responsePath = path.join(coordination, 'prompts', `${taskId}-response.txt`);
+    writeText(responsePath, aiResponse);
+    console.log(`AI response saved: ${responsePath}`);
+
+    const parsed = parseAiResponse(aiResponse);
+    const created = createReportForTask(root, config, taskId, {
+      doneItems: parsed.doneItems,
+      changedFiles: parsed.changedFiles,
+      testsOutput: parsed.testsOutput,
+      nextSteps: parsed.nextSteps,
+      executor: `${options.ai}${options.model ? `:${options.model}` : ''}`,
+      status: parsed.status,
+      resultSummary: parsed.resultSummary,
+    });
+
+    console.log(`Auto report created: ${created.reportId}`);
+    console.log(`Report file: ${created.reportPath}`);
   });
 
 program
@@ -741,63 +1071,18 @@ program
   ) => {
     const root = findProjectRoot(process.cwd());
     const config = loadConfig(root);
-    const coordination = coordinationRoot(root, config);
-    const tasksDir = path.join(coordination, 'tasks');
 
-    const { taskPath, taskContent } = requireTaskContent(tasksDir, taskId);
+    const created = createReportForTask(root, config, taskId, {
+      doneItems: splitList(options.done),
+      changedFiles: splitList(options.files),
+      testsOutput: options.tests,
+      nextSteps: splitList(options.next),
+      executor: options.executor,
+      status: normalizeTaskStatus(options.status),
+    });
 
-    const reportsDir = path.join(coordination, 'reports');
-    const reportId = nextEntityId(reportsDir, config.report_prefix);
-    const reportPath = path.join(reportsDir, `${reportId}.md`);
-
-    const title = extractTaskTitle(taskContent);
-
-    const doneItems = splitList(options.done).map((item) => `- ✅ ${item}`).join('\n') || '- ✅ Implemented task';
-    const changedFiles = splitList(options.files).map((item) => `- ${item}`).join('\n') || '- Not specified';
-    const nextSteps = splitList(options.next).map((item) => `- [ ] ${item}`).join('\n') || '- [ ] Define next task';
-
-    const report = `# ${reportId}: ${title}
-
-## DATE
-${nowIso()}
-
-## EXECUTOR
-${options.executor}
-
-## STATUS
-${options.status}
-
-## TASK
-${taskId}
-
-## WORK DONE
-${doneItems}
-
-## FILES CHANGED
-${changedFiles}
-
-## TESTS
-\`\`\`text
-${options.tests}
-\`\`\`
-
-## RESULT
-Task ${taskId} completed and documented.
-
-## NEXT STEPS
-${nextSteps}
-`;
-
-    writeText(reportPath, report);
-
-    const status = options.status.toUpperCase() as TaskStatus;
-    const finalStatus: TaskStatus = ['CREATED', 'IN_PROGRESS', 'COMPLETED', 'BLOCKED'].includes(status)
-      ? status
-      : 'COMPLETED';
-    updateTaskStatus(taskPath, finalStatus);
-
-    console.log(`Report created: ${reportId}`);
-    console.log(`Report file: ${reportPath}`);
+    console.log(`Report created: ${created.reportId}`);
+    console.log(`Report file: ${created.reportPath}`);
   });
 
 program
@@ -885,15 +1170,16 @@ program
       if (!Number.isInteger(index) || index < 1 || index > suggestions.length) {
         throw new Error(`Invalid index: ${options.create}`);
       }
-      const title = suggestions[index - 1];
-      const created = createTask(root, title, {
+
+      const created = createTask(root, suggestions[index - 1], {
         priority: options.priority,
         assignee: options.assignee,
         details: `Auto-created from ${path.basename(latestReportPath)} (step ${index})`,
         files: [],
         dependsOn: splitList(options.dependsOn).map((dep) => dep.toUpperCase()),
       });
-      console.log(`Created ${created.id}: ${title}`);
+
+      console.log(`Created ${created.id}: ${suggestions[index - 1]}`);
     }
   });
 

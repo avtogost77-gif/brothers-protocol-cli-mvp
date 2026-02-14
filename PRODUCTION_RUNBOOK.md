@@ -22,6 +22,9 @@ node dist/cli.js report TASK-001 --done "Fixed selectors;Added tests" --files "i
 node dist/cli.js task "Deploy to staging" --depends-on TASK-001
 node dist/cli.js relay-check TASK-002
 node dist/cli.js start TASK-002 --with-baton BATON-001
+node dist/cli.js relay-check TASK-002 --json
+node dist/cli.js baton-info BATON-001 --json
+BROTHERS_MOCK_AI_RESPONSE="## WORK DONE\n- ✅ Auto done\n## FILES CHANGED\n- src/cli.ts\n## TESTS\nPASS\n## RESULT\nDone\n## NEXT STEPS\n- [ ] Deploy" node dist/cli.js start TASK-003 --ai mock --auto --model mock-v1
 node dist/cli.js status
 node dist/cli.js next
 ```

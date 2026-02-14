@@ -21,6 +21,31 @@ run node "$ROOT_DIR/dist/cli.js" status
 run node "$ROOT_DIR/dist/cli.js" next --create 1
 run node "$ROOT_DIR/dist/cli.js" link TASK-002 --depends-on TASK-001
 run node "$ROOT_DIR/dist/cli.js" relay-check TASK-002
+run node "$ROOT_DIR/dist/cli.js" baton-info BATON-001
 run node "$ROOT_DIR/dist/cli.js" start TASK-002 --with-baton BATON-001
+run node "$ROOT_DIR/dist/cli.js" task "Auto smoke task"
+
+MOCK_RESPONSE="$(cat <<'EOF_MOCK'
+## STATUS
+COMPLETED
+
+## WORK DONE
+- ✅ Auto smoke completion
+
+## FILES CHANGED
+- coordination/tasks/TASK-003.md
+
+## TESTS
+PASS auto smoke
+
+## RESULT
+Auto path verified.
+
+## NEXT STEPS
+- [ ] Review report
+EOF_MOCK
+)"
+
+run env BROTHERS_MOCK_AI_RESPONSE="$MOCK_RESPONSE" node "$ROOT_DIR/dist/cli.js" start TASK-003 --ai mock --auto --model mock-v1
 
 echo "Smoke flow completed in: $TMP_DIR/project"
