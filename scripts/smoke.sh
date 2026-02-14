@@ -19,5 +19,8 @@ run node "$ROOT_DIR/dist/cli.js" start TASK-001 --ai claude
 run node "$ROOT_DIR/dist/cli.js" report TASK-001 --done "Generated prompt;Created report;Validated handoff" --files "coordination/tasks/TASK-001.md,coordination/reports/REPORT-001.md" --tests "PASS smoke checks" --next "Prepare v0.2 relay validation"
 run node "$ROOT_DIR/dist/cli.js" status
 run node "$ROOT_DIR/dist/cli.js" next --create 1
+run node "$ROOT_DIR/dist/cli.js" link TASK-002 --depends-on TASK-001
+run node "$ROOT_DIR/dist/cli.js" relay-check TASK-002
+run node "$ROOT_DIR/dist/cli.js" start TASK-002 --with-baton BATON-001
 
 echo "Smoke flow completed in: $TMP_DIR/project"

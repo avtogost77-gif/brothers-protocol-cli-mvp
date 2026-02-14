@@ -24,3 +24,9 @@
 - Create private GitHub repository via PAT-authenticated gh
 - Push local git history
 - Provide runbook and acceptance commands
+
+## Stage 6: Relay Safety (v0.2)
+- Add task dependencies (`task --depends-on` + `link --depends-on`)
+- Add `relay-check` command for dependency/report/artifact validation
+- Generate relay baton JSON and enforce `start --with-baton` for dependent tasks
+- Add tests for blocked start without baton and successful start with baton

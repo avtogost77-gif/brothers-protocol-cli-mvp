@@ -5,6 +5,8 @@ Lightweight markdown-first orchestration CLI for AI task handoff.
 ## Commands (MVP)
 - `brothers init`
 - `brothers task <title>`
+- `brothers link <TASK-ID> --depends-on TASK-001`
+- `brothers relay-check <TASK-ID>`
 - `brothers start <TASK-ID>`
 - `brothers report <TASK-ID>`
 - `brothers status`
@@ -19,6 +21,9 @@ node dist/cli.js init
 node dist/cli.js task "Fix calculator bug"
 node dist/cli.js start TASK-001
 node dist/cli.js report TASK-001 --done "Fixed form id" --tests "PASS" --next "Deploy to staging"
+node dist/cli.js task "Deploy to staging" --depends-on TASK-001
+node dist/cli.js relay-check TASK-002
+node dist/cli.js start TASK-002 --with-baton BATON-001
 node dist/cli.js status
 ```
 

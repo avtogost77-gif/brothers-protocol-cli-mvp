@@ -1,6 +1,6 @@
 {
   "name": "brothers-protocol-cli-mvp",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "main": "dist/cli.js",
   "directories": {
     "test": "tests"
@@ -15,7 +15,7 @@
   "author": "",
   "license": "ISC",
   "description": "Brothers Protocol CLI MVP",
-  "private": "false",
+  "private": false,
   "type": "module",
   "bin": {
     "brothers": "dist/cli.js"

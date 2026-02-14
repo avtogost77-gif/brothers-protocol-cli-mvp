@@ -24,6 +24,16 @@ function run(args, cwd) {
   return result.stdout;
 }
 
+function runFail(args, cwd) {
+  const result = spawnSync('node', [cliPath, ...args], {
+    cwd,
+    encoding: 'utf-8',
+  });
+
+  assert.notEqual(result.status, 0, `Expected command to fail: ${args.join(' ')}`);
+  return `${result.stdout}\n${result.stderr}`;
+}
+
 test('MVP flow: init -> task -> start -> report -> status -> next', () => {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'brothers-mvp-'));
 
@@ -31,6 +41,7 @@ test('MVP flow: init -> task -> start -> report -> status -> next', () => {
   assert.ok(fs.existsSync(path.join(tempRoot, '.brothers-config.json')));
   assert.ok(fs.existsSync(path.join(tempRoot, 'coordination', 'tasks')));
   assert.ok(fs.existsSync(path.join(tempRoot, 'coordination', 'reports')));
+  assert.ok(fs.existsSync(path.join(tempRoot, 'coordination', 'batons')));
 
   const taskOutput = run([
     'task',
@@ -56,7 +67,7 @@ test('MVP flow: init -> task -> start -> report -> status -> next', () => {
     '--done',
     'Updated calculator id;Adjusted event listeners;Added regression test',
     '--files',
-    'index.html,assets/js/calculator.js,tests/calculator.test.js',
+    'coordination/tasks/TASK-001.md',
     '--tests',
     'PASS tests/calculator.test.js (3/3)',
     '--next',
@@ -76,4 +87,44 @@ test('MVP flow: init -> task -> start -> report -> status -> next', () => {
 
   const task2Path = path.join(tempRoot, 'coordination', 'tasks', 'TASK-002.md');
   assert.ok(fs.existsSync(task2Path));
+});
+
+test('Relay flow: dependency requires baton', () => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'brothers-relay-'));
+
+  run(['init'], tempRoot);
+
+  run(['task', 'Base task'], tempRoot);
+  run(['start', 'TASK-001'], tempRoot);
+  run([
+    'report',
+    'TASK-001',
+    '--done',
+    'Implemented base',
+    '--files',
+    'coordination/tasks/TASK-001.md',
+    '--tests',
+    'PASS',
+    '--next',
+    'Dependent task',
+  ], tempRoot);
+
+  run([
+    'task',
+    'Dependent task',
+    '--depends-on',
+    'TASK-001',
+  ], tempRoot);
+
+  const blockedStart = runFail(['start', 'TASK-002'], tempRoot);
+  assert.match(blockedStart, /has dependencies/);
+  assert.match(blockedStart, /relay-check/);
+
+  const relayOutput = run(['relay-check', 'TASK-002'], tempRoot);
+  assert.match(relayOutput, /Relay validation passed/);
+  assert.match(relayOutput, /Baton: BATON-001/);
+
+  const startWithBaton = run(['start', 'TASK-002', '--with-baton', 'BATON-001'], tempRoot);
+  assert.match(startWithBaton, /Baton verified: BATON-001/);
+  assert.match(startWithBaton, /Task TASK-002 started/);
 });

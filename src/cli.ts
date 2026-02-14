@@ -5,7 +5,7 @@ import path from 'node:path';
 import { Command } from 'commander';
 
 const program = new Command();
-const VERSION = '0.1.0';
+const VERSION = '0.2.0';
 
 type TaskStatus = 'CREATED' | 'IN_PROGRESS' | 'COMPLETED' | 'BLOCKED';
 
@@ -19,6 +19,22 @@ type Config = {
   report_prefix: string;
   conventions_file: string;
   rules_file: string;
+};
+
+type RelayDependencyValidation = {
+  taskId: string;
+  reportId: string;
+  artifactsChecked: string[];
+  warnings: string[];
+};
+
+type RelayBaton = {
+  id: string;
+  createdAt: string;
+  toTask: string;
+  dependencies: RelayDependencyValidation[];
+  checks: string[];
+  passed: boolean;
 };
 
 const DEFAULT_CONFIG: Config = {
@@ -90,9 +106,10 @@ function coordinationRoot(root: string, config: Config): string {
   return toAbs(root, config.coordination_dir);
 }
 
-function numericIdsFromFiles(dirPath: string, prefix: string): number[] {
+function numericIdsFromFiles(dirPath: string, prefix: string, extension = '.md'): number[] {
   if (!fs.existsSync(dirPath)) return [];
-  const matcher = new RegExp(`^${prefix}-(\\d+)\\.md$`);
+  const escapedExt = extension.replace('.', '\\.')
+  const matcher = new RegExp(`^${prefix}-(\\d+)${escapedExt}$`);
   return fs
     .readdirSync(dirPath)
     .map((name) => {
@@ -102,8 +119,8 @@ function numericIdsFromFiles(dirPath: string, prefix: string): number[] {
     .filter((id): id is number => Number.isFinite(id));
 }
 
-function nextEntityId(dirPath: string, prefix: string): string {
-  const ids = numericIdsFromFiles(dirPath, prefix);
+function nextEntityId(dirPath: string, prefix: string, extension = '.md'): string {
+  const ids = numericIdsFromFiles(dirPath, prefix, extension);
   const next = ids.length === 0 ? 1 : Math.max(...ids) + 1;
   return `${prefix}-${String(next).padStart(3, '0')}`;
 }
@@ -120,8 +137,62 @@ function readTaskStatus(content: string): TaskStatus {
   return status ?? 'CREATED';
 }
 
-function renderTaskMarkdown(id: string, title: string, priority: string, assignee: string, details: string, files: string[]): string {
+function extractSection(content: string, sectionTitle: string): string {
+  const escaped = sectionTitle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const matcher = new RegExp(`##\\s+${escaped}([\\s\\S]*?)(\\n##\\s+|$)`, 'i');
+  const match = content.match(matcher);
+  return match?.[1]?.trim() ?? '';
+}
+
+function parseDependencies(taskContent: string): string[] {
+  const section = extractSection(taskContent, 'Dependencies');
+  if (!section) return [];
+  const lines = section
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  const deps: string[] = [];
+  for (const line of lines) {
+    if (/^none$/i.test(line)) continue;
+    const bullet = line.match(/^[-*]\s*(.+)$/);
+    const value = bullet ? bullet[1].trim() : line;
+    if (/^TASK-\d+$/i.test(value)) {
+      deps.push(value.toUpperCase());
+    }
+  }
+
+  return Array.from(new Set(deps));
+}
+
+function replaceDependenciesSection(taskContent: string, dependencies: string[]): string {
+  const depsBlock = dependencies.length > 0 ? dependencies.map((dep) => `- ${dep}`).join('\n') : 'None';
+  const matcher = /##\s+Dependencies[\s\S]*?(\n##\s+|\n---|$)/i;
+
+  if (matcher.test(taskContent)) {
+    return taskContent.replace(matcher, `## Dependencies\n${depsBlock}\n\n$1`);
+  }
+
+  const marker = '\n## Done Criteria';
+  const insertion = `\n## Dependencies\n${depsBlock}\n`;
+  if (taskContent.includes(marker)) {
+    return taskContent.replace(marker, `${insertion}${marker}`);
+  }
+
+  return `${taskContent.trim()}\n\n## Dependencies\n${depsBlock}\n`;
+}
+
+function renderTaskMarkdown(
+  id: string,
+  title: string,
+  priority: string,
+  assignee: string,
+  details: string,
+  files: string[],
+  dependencies: string[],
+): string {
   const filesList = files.length > 0 ? files.map((file) => `- ${file}`).join('\n') : 'None';
+  const depsList = dependencies.length > 0 ? dependencies.map((dep) => `- ${dep}`).join('\n') : 'None';
   return `# ${id}: ${title}
 
 ## Description
@@ -138,6 +209,9 @@ ${priority}
 
 ## Details
 ${details || '[Fill details]'}
+
+## Dependencies
+${depsList}
 
 ## Done Criteria
 - [ ] Code works
@@ -169,9 +243,9 @@ function getLatestReportFiles(reportsDir: string, count: number): string[] {
 }
 
 function parseNextSteps(reportContent: string): string[] {
-  const sectionMatch = reportContent.match(/##\s+NEXT STEPS([\s\S]*?)(\n##\s+|$)/i);
-  if (!sectionMatch) return [];
-  const section = sectionMatch[1];
+  const section = extractSection(reportContent, 'NEXT STEPS');
+  if (!section) return [];
+
   const lines = section
     .split('\n')
     .map((line) => line.trim())
@@ -194,6 +268,7 @@ function setupProject(root: string, projectName: string): void {
   ensureDir(path.join(coordination, 'templates'));
   ensureDir(path.join(coordination, 'prompts'));
   ensureDir(path.join(coordination, 'archive'));
+  ensureDir(path.join(coordination, 'batons'));
 
   const config: Config = {
     ...DEFAULT_CONFIG,
@@ -224,6 +299,9 @@ function setupProject(root: string, projectName: string): void {
 ## Details
 {DETAILS}
 
+## Dependencies
+{DEPENDENCIES}
+
 ## Done Criteria
 - [ ] Code works
 - [ ] Tests pass
@@ -241,16 +319,16 @@ function setupProject(root: string, projectName: string): void {
     path.join(coordination, 'templates', 'report-template.md'),
     `# REPORT-{ID}: {TASK_TITLE}
 
-## Date
+## DATE
 {DATE}
 
-## Executor
+## EXECUTOR
 {EXECUTOR}
 
-## Status
+## STATUS
 {STATUS}
 
-## Task
+## TASK
 {TASK_ID}
 
 ## WORK DONE
@@ -298,7 +376,11 @@ node dist/cli.js status
   }
 }
 
-function createTask(root: string, title: string, options: { priority: string; assignee: string; details: string; files: string[] }): { id: string; taskPath: string } {
+function createTask(
+  root: string,
+  title: string,
+  options: { priority: string; assignee: string; details: string; files: string[]; dependsOn: string[] },
+): { id: string; taskPath: string } {
   const config = loadConfig(root);
   const coordination = coordinationRoot(root, config);
   const tasksDir = path.join(coordination, 'tasks');
@@ -311,9 +393,190 @@ function createTask(root: string, title: string, options: { priority: string; as
     options.assignee,
     options.details,
     options.files,
+    options.dependsOn,
   );
   writeText(taskPath, content);
   return { id, taskPath };
+}
+
+function getTaskPath(tasksDir: string, taskId: string): string {
+  return path.join(tasksDir, `${taskId}.md`);
+}
+
+function requireTaskContent(tasksDir: string, taskId: string): { taskPath: string; taskContent: string } {
+  const taskPath = getTaskPath(tasksDir, taskId);
+  if (!fs.existsSync(taskPath)) {
+    throw new Error(`Task not found: ${taskId}`);
+  }
+  return { taskPath, taskContent: fs.readFileSync(taskPath, 'utf-8') };
+}
+
+function findLatestReportForTask(reportsDir: string, taskId: string): { reportId: string; reportPath: string; reportContent: string } | null {
+  const files = getLatestReportFiles(reportsDir, Number.MAX_SAFE_INTEGER).reverse();
+
+  for (const reportPath of files) {
+    const content = fs.readFileSync(reportPath, 'utf-8');
+    const section = extractSection(content, 'TASK');
+    const linkedTask = section.split('\n')[0]?.trim();
+    if (linkedTask === taskId) {
+      const reportId = path.basename(reportPath, '.md');
+      return { reportId, reportPath, reportContent: content };
+    }
+  }
+
+  return null;
+}
+
+function parseChangedFiles(reportContent: string): string[] {
+  const section = extractSection(reportContent, 'FILES CHANGED');
+  if (!section) return [];
+
+  const lines = section
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  const files: string[] = [];
+  for (const line of lines) {
+    const bullet = line.match(/^[-*]\s+(.+)$/);
+    if (!bullet) continue;
+    const candidate = bullet[1]
+      .replace(/^`|`$/g, '')
+      .replace(/\s+\(.*\)$/, '')
+      .trim();
+    if (!candidate || /^not specified$/i.test(candidate)) continue;
+    files.push(candidate);
+  }
+
+  return Array.from(new Set(files));
+}
+
+function validateReportStructure(reportContent: string): string[] {
+  const requiredSections = ['WORK DONE', 'FILES CHANGED', 'TESTS', 'RESULT', 'NEXT STEPS'];
+  const missing: string[] = [];
+  for (const section of requiredSections) {
+    if (!extractSection(reportContent, section)) {
+      missing.push(section);
+    }
+  }
+  return missing;
+}
+
+function runRelayCheck(root: string, config: Config, taskId: string): { baton: RelayBaton; batonPath: string; warnings: string[] } {
+  const coordination = coordinationRoot(root, config);
+  const tasksDir = path.join(coordination, 'tasks');
+  const reportsDir = path.join(coordination, 'reports');
+  const batonsDir = path.join(coordination, 'batons');
+
+  const { taskContent } = requireTaskContent(tasksDir, taskId);
+  const dependencies = parseDependencies(taskContent);
+
+  if (dependencies.length === 0) {
+    throw new Error(`Task ${taskId} has no dependencies. Relay check is not required.`);
+  }
+
+  const errors: string[] = [];
+  const warnings: string[] = [];
+  const validatedDeps: RelayDependencyValidation[] = [];
+
+  for (const dep of dependencies) {
+    const depTaskPath = getTaskPath(tasksDir, dep);
+    if (!fs.existsSync(depTaskPath)) {
+      errors.push(`${dep}: task file is missing`);
+      continue;
+    }
+
+    const depTaskContent = fs.readFileSync(depTaskPath, 'utf-8');
+    const depStatus = readTaskStatus(depTaskContent);
+    if (depStatus !== 'COMPLETED') {
+      errors.push(`${dep}: status is ${depStatus}, expected COMPLETED`);
+      continue;
+    }
+
+    const report = findLatestReportForTask(reportsDir, dep);
+    if (!report) {
+      errors.push(`${dep}: report not found`);
+      continue;
+    }
+
+    const missingSections = validateReportStructure(report.reportContent);
+    if (missingSections.length > 0) {
+      errors.push(`${dep}: report ${report.reportId} missing sections ${missingSections.join(', ')}`);
+      continue;
+    }
+
+    const changedFiles = parseChangedFiles(report.reportContent);
+    const missingFiles = changedFiles.filter((file) => !fs.existsSync(path.resolve(root, file)));
+    if (missingFiles.length > 0) {
+      errors.push(`${dep}: missing artifacts ${missingFiles.join(', ')}`);
+      continue;
+    }
+
+    const testsSection = extractSection(report.reportContent, 'TESTS');
+    if (/not run|not executed|не запуск/i.test(testsSection)) {
+      warnings.push(`${dep}: tests were not executed according to ${report.reportId}`);
+    }
+
+    validatedDeps.push({
+      taskId: dep,
+      reportId: report.reportId,
+      artifactsChecked: changedFiles,
+      warnings: [],
+    });
+  }
+
+  if (errors.length > 0) {
+    throw new Error(`Relay validation failed:\n- ${errors.join('\n- ')}`);
+  }
+
+  ensureDir(batonsDir);
+  const batonId = nextEntityId(batonsDir, 'BATON', '.json');
+  const baton: RelayBaton = {
+    id: batonId,
+    createdAt: nowIso(),
+    toTask: taskId,
+    dependencies: validatedDeps,
+    checks: [
+      'dependencies_completed',
+      'reports_exist',
+      'report_sections_valid',
+      'artifacts_exist',
+    ],
+    passed: true,
+  };
+
+  const batonPath = path.join(batonsDir, `${batonId}.json`);
+  writeText(batonPath, `${JSON.stringify(baton, null, 2)}\n`);
+
+  return { baton, batonPath, warnings };
+}
+
+function verifyBatonForTask(
+  coordination: string,
+  taskId: string,
+  dependencies: string[],
+  batonId: string,
+): RelayBaton {
+  const batonPath = path.join(coordination, 'batons', `${batonId}.json`);
+  if (!fs.existsSync(batonPath)) {
+    throw new Error(`Baton not found: ${batonId}. Run: brothers relay-check ${taskId}`);
+  }
+
+  const baton = JSON.parse(fs.readFileSync(batonPath, 'utf-8')) as RelayBaton;
+  if (!baton.passed) {
+    throw new Error(`Baton ${batonId} is not passed`);
+  }
+  if (baton.toTask !== taskId) {
+    throw new Error(`Baton ${batonId} is for ${baton.toTask}, not ${taskId}`);
+  }
+
+  const batonDeps = baton.dependencies.map((dep) => dep.taskId).sort();
+  const taskDeps = [...dependencies].sort();
+  if (JSON.stringify(batonDeps) !== JSON.stringify(taskDeps)) {
+    throw new Error(`Baton ${batonId} does not match current dependencies for ${taskId}`);
+  }
+
+  return baton;
 }
 
 program
@@ -337,7 +600,7 @@ program
     setupProject(root, effectiveName);
 
     console.log(`Initialized Brothers Protocol project at: ${root}`);
-    console.log('Created: coordination/tasks, coordination/reports, coordination/templates, .brothers-config.json');
+    console.log('Created: coordination/tasks, coordination/reports, coordination/templates, coordination/batons, .brothers-config.json');
   });
 
 program
@@ -348,13 +611,24 @@ program
   .option('-a, --assignee <assignee>', 'Task assignee', 'auto')
   .option('-d, --details <details>', 'Task details', '')
   .option('-f, --files <files>', 'Comma/semicolon separated files', '')
-  .action((title: string, options: { priority: string; assignee: string; details: string; files: string }) => {
+  .option('--depends-on <taskIds>', 'Comma/semicolon separated dependencies, e.g. TASK-001,TASK-002', '')
+  .action((
+    title: string,
+    options: {
+      priority: string;
+      assignee: string;
+      details: string;
+      files: string;
+      dependsOn: string;
+    },
+  ) => {
     const root = findProjectRoot(process.cwd());
     const created = createTask(root, title, {
       priority: options.priority,
       assignee: options.assignee,
       details: options.details,
       files: splitList(options.files),
+      dependsOn: splitList(options.dependsOn).map((dep) => dep.toUpperCase()),
     });
 
     console.log(`Created ${created.id}: ${title}`);
@@ -362,21 +636,68 @@ program
   });
 
 program
+  .command('link')
+  .description('Attach dependency links to an existing task')
+  .argument('<taskId>', 'Task id, e.g. TASK-002')
+  .requiredOption('--depends-on <taskIds>', 'Comma/semicolon separated dependencies')
+  .action((taskId: string, options: { dependsOn: string }) => {
+    const root = findProjectRoot(process.cwd());
+    const config = loadConfig(root);
+    const tasksDir = path.join(coordinationRoot(root, config), 'tasks');
+    const { taskPath, taskContent } = requireTaskContent(tasksDir, taskId);
+
+    const deps = splitList(options.dependsOn).map((dep) => dep.toUpperCase());
+    const updated = replaceDependenciesSection(taskContent, deps);
+    writeText(taskPath, updated);
+
+    console.log(`Updated dependencies for ${taskId}`);
+    console.log(`Dependencies: ${deps.join(', ') || 'None'}`);
+  });
+
+program
+  .command('relay-check')
+  .description('Validate dependency chain and issue relay baton for a task')
+  .argument('<taskId>', 'Task id, e.g. TASK-002')
+  .action((taskId: string) => {
+    const root = findProjectRoot(process.cwd());
+    const config = loadConfig(root);
+
+    const result = runRelayCheck(root, config, taskId);
+
+    console.log(`Relay validation passed for ${taskId}`);
+    console.log(`Baton: ${result.baton.id}`);
+    console.log(`Baton file: ${result.batonPath}`);
+    if (result.warnings.length > 0) {
+      console.log('Warnings:');
+      result.warnings.forEach((warning) => console.log(`- ${warning}`));
+    }
+  });
+
+program
   .command('start')
   .description('Start task and generate AI prompt')
   .argument('<taskId>', 'Task id, e.g. TASK-001')
   .option('--ai <provider>', 'AI provider name', 'manual')
-  .action((taskId: string, options: { ai: string }) => {
+  .option('--with-baton <batonId>', 'Validated baton id, e.g. BATON-001')
+  .action((taskId: string, options: { ai: string; withBaton?: string }) => {
     const root = findProjectRoot(process.cwd());
     const config = loadConfig(root);
     const coordination = coordinationRoot(root, config);
-    const taskPath = path.join(coordination, 'tasks', `${taskId}.md`);
+    const tasksDir = path.join(coordination, 'tasks');
 
-    if (!fs.existsSync(taskPath)) {
-      throw new Error(`Task not found: ${taskId}`);
+    const { taskPath, taskContent } = requireTaskContent(tasksDir, taskId);
+
+    const dependencies = parseDependencies(taskContent);
+    if (dependencies.length > 0) {
+      if (!options.withBaton) {
+        throw new Error(
+          `Task ${taskId} has dependencies (${dependencies.join(', ')}). ` +
+          `Run: brothers relay-check ${taskId} and start with --with-baton BATON-XXX`,
+        );
+      }
+      verifyBatonForTask(coordination, taskId, dependencies, options.withBaton);
     }
 
-    const taskContent = fs.readFileSync(taskPath, 'utf-8');
     const rules = readTextIfExists(toAbs(root, config.rules_file));
     const conventions = readTextIfExists(toAbs(root, config.conventions_file));
     const latestReports = getLatestReportFiles(path.join(coordination, 'reports'), 3)
@@ -391,6 +712,9 @@ program
 
     console.log(`Task ${taskId} started`);
     console.log(`AI provider: ${options.ai}`);
+    if (options.withBaton) {
+      console.log(`Baton verified: ${options.withBaton}`);
+    }
     console.log(`Prompt file: ${promptPath}`);
   });
 
@@ -418,17 +742,14 @@ program
     const root = findProjectRoot(process.cwd());
     const config = loadConfig(root);
     const coordination = coordinationRoot(root, config);
-    const taskPath = path.join(coordination, 'tasks', `${taskId}.md`);
+    const tasksDir = path.join(coordination, 'tasks');
 
-    if (!fs.existsSync(taskPath)) {
-      throw new Error(`Task not found: ${taskId}`);
-    }
+    const { taskPath, taskContent } = requireTaskContent(tasksDir, taskId);
 
     const reportsDir = path.join(coordination, 'reports');
     const reportId = nextEntityId(reportsDir, config.report_prefix);
     const reportPath = path.join(reportsDir, `${reportId}.md`);
 
-    const taskContent = fs.readFileSync(taskPath, 'utf-8');
     const title = extractTaskTitle(taskContent);
 
     const doneItems = splitList(options.done).map((item) => `- ✅ ${item}`).join('\n') || '- ✅ Implemented task';
@@ -489,6 +810,7 @@ program
 
     const tasksDir = path.join(coordination, 'tasks');
     const reportsDir = path.join(coordination, 'reports');
+    const batonsDir = path.join(coordination, 'batons');
 
     const taskFiles = fs.existsSync(tasksDir)
       ? fs.readdirSync(tasksDir).filter((name) => /^TASK-\d+\.md$/.test(name)).sort()
@@ -511,6 +833,10 @@ program
       ? fs.readdirSync(reportsDir).filter((name) => /^REPORT-\d+\.md$/.test(name)).sort()
       : [];
 
+    const batonFiles = fs.existsSync(batonsDir)
+      ? fs.readdirSync(batonsDir).filter((name) => /^BATON-\d+\.json$/.test(name)).sort()
+      : [];
+
     const lastReport = reportFiles.length > 0 ? reportFiles[reportFiles.length - 1] : 'None';
 
     console.log('BROTHERS STATUS');
@@ -521,6 +847,7 @@ program
     console.log(`  CREATED: ${statuses.CREATED}`);
     console.log(`  BLOCKED: ${statuses.BLOCKED}`);
     console.log(`Reports total: ${reportFiles.length}`);
+    console.log(`Batons total: ${batonFiles.length}`);
     console.log(`Last report: ${lastReport}`);
   });
 
@@ -530,7 +857,8 @@ program
   .option('--create <index>', 'Create task by 1-based index from next steps')
   .option('-p, --priority <priority>', 'Priority for auto-created task', 'medium')
   .option('-a, --assignee <assignee>', 'Assignee for auto-created task', 'auto')
-  .action((options: { create?: string; priority: string; assignee: string }) => {
+  .option('--depends-on <taskIds>', 'Dependencies for auto-created task', '')
+  .action((options: { create?: string; priority: string; assignee: string; dependsOn: string }) => {
     const root = findProjectRoot(process.cwd());
     const config = loadConfig(root);
     const reportsDir = path.join(coordinationRoot(root, config), 'reports');
@@ -563,6 +891,7 @@ program
         assignee: options.assignee,
         details: `Auto-created from ${path.basename(latestReportPath)} (step ${index})`,
         files: [],
+        dependsOn: splitList(options.dependsOn).map((dep) => dep.toUpperCase()),
       });
       console.log(`Created ${created.id}: ${title}`);
     }

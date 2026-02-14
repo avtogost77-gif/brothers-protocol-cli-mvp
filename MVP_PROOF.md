@@ -16,9 +16,11 @@ Result:
 TAP version 13
 # Subtest: MVP flow: init -> task -> start -> report -> status -> next
 ok 1 - MVP flow: init -> task -> start -> report -> status -> next
-1..1
-# tests 1
-# pass 1
+# Subtest: Relay flow: dependency requires baton
+ok 2 - Relay flow: dependency requires baton
+1..2
+# tests 2
+# pass 2
 # fail 0
 ```
 
@@ -41,6 +43,11 @@ BROTHERS STATUS
   COMPLETED: 1
 Reports total: 1
 Created TASK-002: Prepare v0.2 relay validation
+Updated dependencies for TASK-002
+Relay validation passed for TASK-002
+Baton: BATON-001
+Task TASK-002 started
+Baton verified: BATON-001
 ```
 
 ## 3) Private repository delivery
