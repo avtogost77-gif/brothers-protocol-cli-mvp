@@ -7,11 +7,22 @@
   },
   "scripts": {
     "test": "npm run build && node --test tests/*.test.mjs",
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && npm run build:tui",
+    "build:tui": "esbuild src/tui/index.tsx src/tui/App.tsx src/tui/lib.ts src/tui/screens/TaskList.tsx src/tui/screens/TaskDetail.tsx src/tui/screens/CreateTask.tsx src/tui/components/StatusBar.tsx src/tui/components/Badge.tsx --format=esm --platform=node --outdir=dist/tui --jsx=automatic",
     "dev": "tsx src/cli.ts",
+    "dev:ui": "tsx src/tui/index.tsx",
     "smoke": "npm run build && bash scripts/smoke.sh"
   },
-  "keywords": ["ai", "agents", "orchestration", "cli", "task-management", "relay", "handoff", "llm"],
+  "keywords": [
+    "ai",
+    "agents",
+    "orchestration",
+    "cli",
+    "task-management",
+    "relay",
+    "handoff",
+    "llm"
+  ],
   "author": "avtogost77-gif",
   "license": "MIT",
   "description": "Markdown-first CLI for safe task handoff between AI agents — Relay Baton protocol",
@@ -21,10 +32,13 @@
     "brothers": "dist/cli.js"
   },
   "dependencies": {
-    "commander": "^14.0.1"
+    "commander": "^14.0.1",
+    "ink": "^6.8.0",
+    "react": "^19.2.4"
   },
   "devDependencies": {
     "@types/node": "^24.3.0",
+    "@types/react": "^19.2.14",
     "tsx": "^4.20.5",
     "typescript": "^5.9.2"
   }

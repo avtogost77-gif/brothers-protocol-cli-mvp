@@ -1569,4 +1569,20 @@ program
     }
   });
 
+// ─── UI (TUI dashboard) ────────────────────────────────────────────────────────
+program
+  .command('ui')
+  .description('Launch interactive TUI dashboard')
+  .action(async () => {
+    const { spawn } = await import('node:child_process');
+    const { fileURLToPath: ftu } = await import('node:url');
+    const tuiPath = path.join(path.dirname(ftu(import.meta.url)), 'tui', 'index.js');
+    if (!fs.existsSync(tuiPath)) {
+      console.error('TUI not built. Run: npm run build');
+      process.exit(1);
+    }
+    const child = spawn(process.execPath, [tuiPath], { stdio: 'inherit' });
+    child.on('exit', code => process.exit(code ?? 0));
+  });
+
 program.parseAsync(process.argv);
