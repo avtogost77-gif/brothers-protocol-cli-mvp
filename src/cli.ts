@@ -5,7 +5,7 @@ import path from 'node:path';
 import { Command } from 'commander';
 
 const program = new Command();
-const VERSION = '0.4.0';
+const VERSION = '0.6.0';
 
 type TaskStatus = 'CREATED' | 'IN_PROGRESS' | 'COMPLETED' | 'BLOCKED';
 
@@ -23,6 +23,7 @@ type Config = {
   report_prefix: string;
   conventions_file: string;
   rules_file: string;
+  baton_ttl_hours: number;
 };
 
 type RelayDependencyValidation = {
@@ -35,6 +36,7 @@ type RelayDependencyValidation = {
 type RelayBaton = {
   id: string;
   createdAt: string;
+  expiresAt: string;
   toTask: string;
   dependencies: RelayDependencyValidation[];
   checks: string[];
@@ -64,6 +66,7 @@ const DEFAULT_CONFIG: Config = {
   report_prefix: 'REPORT',
   conventions_file: './CONVENTIONS.md',
   rules_file: './AI_RULES.md',
+  baton_ttl_hours: 72,
 };
 
 function ensureDir(dirPath: string): void {
@@ -148,9 +151,26 @@ function numericIdsFromFiles(dirPath: string, prefix: string, extension = '.md')
 }
 
 function nextEntityId(dirPath: string, prefix: string, extension = '.md'): string {
-  const ids = numericIdsFromFiles(dirPath, prefix, extension);
-  const next = ids.length === 0 ? 1 : Math.max(...ids) + 1;
-  return `${prefix}-${String(next).padStart(3, '0')}`;
+  ensureDir(dirPath);
+  // Atomic ID allocation: O_EXCL fails if file already exists, preventing race conditions
+  // when multiple CLI processes run concurrently (e.g. in CI pipelines).
+  for (let attempt = 0; attempt < 20; attempt++) {
+    const ids = numericIdsFromFiles(dirPath, prefix, extension);
+    const next = ids.length === 0 ? 1 : Math.max(...ids) + 1;
+    const candidate = `${prefix}-${String(next).padStart(3, '0')}`;
+    const placeholder = path.join(dirPath, `${candidate}${extension}`);
+    try {
+      // O_CREAT | O_EXCL: creates file only if it does NOT exist (atomic on POSIX)
+      const fd = fs.openSync(placeholder, fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_WRONLY);
+      fs.closeSync(fd);
+      // Placeholder written — caller's writeText() will overwrite with real content
+      return candidate;
+    } catch (e: unknown) {
+      if ((e as NodeJS.ErrnoException).code === 'EEXIST') continue; // another process claimed this ID
+      throw e;
+    }
+  }
+  throw new Error(`Failed to allocate unique ${prefix} ID after 20 attempts (concurrent writes?)`);
 }
 
 function normalizeTaskStatus(value: string | undefined): TaskStatus {
@@ -225,6 +245,38 @@ function parseDependencies(taskContent: string): string[] {
   }
 
   return Array.from(new Set(deps));
+}
+
+/**
+ * DFS cycle detection in the task dependency graph.
+ * Returns the cycle path (e.g. ["TASK-001","TASK-003","TASK-001"]) or null if no cycle.
+ * Uses a recursion stack (recStack) to distinguish back-edges from cross-edges.
+ */
+function detectCycles(
+  startId: string,
+  tasksDir: string,
+  visited: Set<string> = new Set(),
+  recStack: string[] = [],
+): string[] | null {
+  if (recStack.includes(startId)) {
+    // Found a back-edge → cycle. Return path from first occurrence to current.
+    return [...recStack.slice(recStack.indexOf(startId)), startId];
+  }
+  if (visited.has(startId)) return null; // already fully explored, no cycle through here
+  visited.add(startId);
+
+  const taskFile = path.join(tasksDir, `${startId}.md`);
+  if (!fs.existsSync(taskFile)) return null; // task doesn't exist yet, skip
+
+  const content = fs.readFileSync(taskFile, 'utf-8');
+  const deps = parseDependencies(content);
+
+  for (const dep of deps) {
+    const cycle = detectCycles(dep, tasksDir, visited, [...recStack, startId]);
+    if (cycle) return cycle;
+  }
+
+  return null;
 }
 
 function replaceDependenciesSection(taskContent: string, dependencies: string[]): string {
@@ -429,6 +481,20 @@ function createTask(
   const tasksDir = path.join(coordination, 'tasks');
 
   const id = nextEntityId(tasksDir, config.task_prefix);
+
+  // Guard: detect cycles before writing. Since `id` doesn't exist yet,
+  // a cycle would only occur if any existing dep already (transitively) points
+  // back to a task with the same id — practically impossible, but safe to check.
+  for (const dep of options.dependsOn) {
+    const cycle = detectCycles(dep, tasksDir, new Set([id]), [id]);
+    if (cycle) {
+      // Remove the placeholder created by nextEntityId before throwing
+      const placeholder = path.join(tasksDir, `${id}.md`);
+      if (fs.existsSync(placeholder)) fs.unlinkSync(placeholder);
+      throw new Error(`Circular dependency detected: ${cycle.join(' → ')}`);
+    }
+  }
+
   const taskPath = path.join(tasksDir, `${id}.md`);
   const content = renderTaskMarkdown(
     id,
@@ -509,17 +575,28 @@ function validateReportStructure(reportContent: string): string[] {
   return missing;
 }
 
-function runRelayCheck(root: string, config: Config, taskId: string): { baton: RelayBaton; batonPath: string; warnings: string[] } {
+function validateRelayCheck(
+  root: string,
+  config: Config,
+  taskId: string,
+): { warnings: string[]; validatedDeps: RelayDependencyValidation[] } {
   const coordination = coordinationRoot(root, config);
   const tasksDir = path.join(coordination, 'tasks');
   const reportsDir = path.join(coordination, 'reports');
-  const batonsDir = path.join(coordination, 'batons');
 
   const { taskContent } = requireTaskContent(tasksDir, taskId);
   const dependencies = parseDependencies(taskContent);
 
   if (dependencies.length === 0) {
     throw new Error(`Task ${taskId} has no dependencies. Relay check is not required.`);
+  }
+
+  // Safety net: reject relay-check if someone manually introduced a cycle
+  for (const dep of dependencies) {
+    const cycle = detectCycles(dep, tasksDir, new Set([taskId]), [taskId]);
+    if (cycle) {
+      throw new Error(`Circular dependency detected: ${cycle.join(' → ')}. Fix dependencies before relay-check.`);
+    }
   }
 
   const errors: string[] = [];
@@ -576,12 +653,30 @@ function runRelayCheck(root: string, config: Config, taskId: string): { baton: R
     throw new Error(`Relay validation failed:\n- ${errors.join('\n- ')}`);
   }
 
+  return { warnings, validatedDeps };
+}
+
+function issueRelayBaton(
+  root: string,
+  config: Config,
+  taskId: string,
+  validatedDeps: RelayDependencyValidation[],
+): { baton: RelayBaton; batonPath: string } {
+  const coordination = coordinationRoot(root, config);
+  const batonsDir = path.join(coordination, 'batons');
+
   ensureDir(batonsDir);
 
   const batonId = nextEntityId(batonsDir, 'BATON', '.json');
+  const ttlHours = config.baton_ttl_hours ?? 72;
+  const expiresAt = new Date(Date.now() + ttlHours * 3600 * 1000)
+    .toISOString()
+    .slice(0, 19)
+    .replace('T', ' ');
   const baton: RelayBaton = {
     id: batonId,
     createdAt: nowIso(),
+    expiresAt,
     toTask: taskId,
     dependencies: validatedDeps,
     checks: ['dependencies_completed', 'reports_exist', 'report_sections_valid', 'artifacts_exist'],
@@ -591,7 +686,7 @@ function runRelayCheck(root: string, config: Config, taskId: string): { baton: R
   const batonPath = path.join(batonsDir, `${batonId}.json`);
   writeText(batonPath, `${JSON.stringify(baton, null, 2)}\n`);
 
-  return { baton, batonPath, warnings };
+  return { baton, batonPath };
 }
 
 function loadBaton(coordination: string, batonId: string): RelayBaton {
@@ -611,6 +706,11 @@ function verifyBatonForTask(
   const baton = loadBaton(coordination, batonId);
 
   if (!baton.passed) throw new Error(`Baton ${batonId} is not passed`);
+  if (baton.expiresAt && new Date(baton.expiresAt) < new Date()) {
+    throw new Error(
+      `Baton ${batonId} expired at ${baton.expiresAt}. Run: brothers relay-check ${taskId} to issue a fresh baton.`,
+    );
+  }
   if (baton.toTask !== taskId) throw new Error(`Baton ${batonId} is for ${baton.toTask}, not ${taskId}`);
 
   const batonDeps = baton.dependencies.map((dep) => dep.taskId).sort();
@@ -1095,6 +1195,15 @@ program
     const { taskPath, taskContent } = requireTaskContent(tasksDir, taskId);
 
     const deps = splitList(options.dependsOn).map((dep) => dep.toUpperCase());
+
+    // Guard: detect circular dependencies before persisting
+    for (const dep of deps) {
+      const cycle = detectCycles(dep, tasksDir, new Set([taskId.toUpperCase()]), [taskId.toUpperCase()]);
+      if (cycle) {
+        throw new Error(`Circular dependency detected: ${cycle.join(' → ')}`);
+      }
+    }
+
     const updated = replaceDependenciesSection(taskContent, deps);
     writeText(taskPath, updated);
 
@@ -1112,34 +1221,44 @@ program
     const root = findProjectRoot(process.cwd());
     const config = loadConfig(root);
 
-    const result = runRelayCheck(root, config, taskId);
-    const strictFailed = options.strict && result.warnings.length > 0;
+    const validation = validateRelayCheck(root, config, taskId);
+    const strictFailed = options.strict && validation.warnings.length > 0;
 
     if (options.json) {
+      if (strictFailed) {
+        console.log(JSON.stringify({
+          passed: false,
+          strict: options.strict,
+          taskId,
+          warnings: validation.warnings,
+        }, null, 2));
+        process.exitCode = 1;
+        return;
+      }
+
+      const issued = issueRelayBaton(root, config, taskId, validation.validatedDeps);
       console.log(JSON.stringify({
-        passed: !strictFailed,
+        passed: true,
         strict: options.strict,
         taskId,
-        batonId: result.baton.id,
-        batonPath: result.batonPath,
-        warnings: result.warnings,
+        batonId: issued.baton.id,
+        batonPath: issued.batonPath,
+        warnings: validation.warnings,
       }, null, 2));
-      if (strictFailed) {
-        throw new Error(`Relay strict mode failed:\\n- ${result.warnings.join('\\n- ')}`);
-      }
       return;
     }
 
     if (strictFailed) {
-      throw new Error(`Relay strict mode failed:\\n- ${result.warnings.join('\\n- ')}`);
+      throw new Error(`Relay strict mode failed:\n- ${validation.warnings.join('\n- ')}`);
     }
 
+    const issued = issueRelayBaton(root, config, taskId, validation.validatedDeps);
     console.log(`Relay validation passed for ${taskId}`);
-    console.log(`Baton: ${result.baton.id}`);
-    console.log(`Baton file: ${result.batonPath}`);
-    if (result.warnings.length > 0) {
+    console.log(`Baton: ${issued.baton.id}`);
+    console.log(`Baton file: ${issued.batonPath}`);
+    if (validation.warnings.length > 0) {
       console.log('Warnings:');
-      result.warnings.forEach((warning) => console.log(`- ${warning}`));
+      validation.warnings.forEach((warning) => console.log(`- ${warning}`));
     }
   });
 
@@ -1160,10 +1279,12 @@ program
       return;
     }
 
+    const expired = baton.expiresAt && new Date(baton.expiresAt) < new Date();
     console.log(`BATON: ${baton.id}`);
-    console.log(`Created: ${baton.createdAt}`);
-    console.log(`To task: ${baton.toTask}`);
-    console.log(`Passed: ${baton.passed ? 'yes' : 'no'}`);
+    console.log(`Created:  ${baton.createdAt}`);
+    console.log(`Expires:  ${baton.expiresAt ?? 'n/a'}${expired ? ' ⚠ EXPIRED' : ''}`);
+    console.log(`To task:  ${baton.toTask}`);
+    console.log(`Passed:   ${baton.passed ? 'yes' : 'no'}`);
     console.log('Dependencies:');
     for (const dep of baton.dependencies) {
       console.log(`- ${dep.taskId} via ${dep.reportId}`);

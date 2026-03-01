@@ -1,6 +1,6 @@
 {
   "name": "brothers-protocol-cli-mvp",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "main": "dist/cli.js",
   "directories": {
     "test": "tests"
@@ -11,10 +11,10 @@
     "dev": "tsx src/cli.ts",
     "smoke": "npm run build && bash scripts/smoke.sh"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "description": "Brothers Protocol CLI MVP",
+  "keywords": ["ai", "agents", "orchestration", "cli", "task-management", "relay", "handoff", "llm"],
+  "author": "avtogost77-gif",
+  "license": "MIT",
+  "description": "Markdown-first CLI for safe task handoff between AI agents — Relay Baton protocol",
   "private": false,
   "type": "module",
   "bin": {

@@ -50,3 +50,13 @@
 - Add `prompt --sanitize-preview --save` for safe handoff preview
 - Add `relay-check --strict` to treat warnings as blockers
 - Add tests for strict relay, dry-run safety, prompt preview, and ai test
+
+## Stage 10: Production Hardening (v0.6)
+- Fix race condition in ID allocation: replace sequential counter with atomic `O_CREAT | O_EXCL` file open (up to 20 retries)
+- Add Relay Baton TTL: `expiresAt = now + baton_ttl_hours` (configurable, default 72h), enforced on `start --with-baton`
+- Add `baton_ttl_hours` to config; `baton-info` shows expiry timestamp with ⚠ EXPIRED warning
+- Add circular dependency detection (DFS): triggered in `createTask`, `link`, and `validateRelayCheck`
+- Cleanup placeholder file on cycle detection error in `createTask`
+- Add SCENARIOS.md: 6 annotated scenarios with algorithms, data flow, file formats, command reference
+- Bump version 0.5.0 → 0.6.0; update package.json description, keywords, license
+- Open-source release: public GitHub repository
