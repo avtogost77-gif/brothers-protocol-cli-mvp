@@ -42,9 +42,11 @@ export function TaskDetail({ task, batons, coordDir, onBack, onOutput }: Props) 
   const activeBaton = batons.find(b => b.toTask === task.id && isBatonActive(b));
   const expiredBaton = batons.find(b => b.toTask === task.id && isBatonExpired(b));
 
+  const hasDeps = task.dependencies.length > 0;
+
   useInput((input, key) => {
     if (key.escape || input === 'b' || input === 'B') { onBack(); return; }
-    if (input === 'c' || input === 'C') {
+    if ((input === 'c' || input === 'C') && hasDeps) {
       const output = runCli(`relay-check ${task.id}`, projectDir);
       onOutput(`relay-check ${task.id}`, output);
     }
@@ -112,7 +114,7 @@ export function TaskDetail({ task, batons, coordDir, onBack, onOutput }: Props) 
       </Box>
 
       <StatusBar hints={[
-        { key: 'C',     label: 'relay-check' },
+        ...(hasDeps ? [{ key: 'C', label: 'relay-check' }] : []),
         { key: 'Esc/B', label: 'назад' },
         { key: 'Q',     label: 'выход' },
       ]} />
