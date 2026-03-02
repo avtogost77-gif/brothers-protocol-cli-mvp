@@ -49,7 +49,11 @@ export function TaskList({ tasks, batons, project, stack, mcp, onDetail, onCreat
             <Text color="gray" dimColor>⬡ {stack.join(' · ')}</Text>
           )}
           {mcp.length > 0 && (
-            <Text color="yellow" dimColor>MCP: {mcp.map(m => m.replace('@modelcontextprotocol/server-', '')).join(', ')}</Text>
+            <Text color="yellow" dimColor>MCP: {mcp.map(m =>
+              m.replace('@modelcontextprotocol/server-', '')
+               .replace('mcp-server-', '')
+               .replace('@playwright/', '')
+            ).join(', ')}</Text>
           )}
         </Box>
       )}

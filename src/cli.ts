@@ -143,10 +143,55 @@ function coordinationRoot(root: string, config: Config): string {
 // ─── Stack detection ──────────────────────────────────────────────────────────
 type StackInfo = { stack: string[]; docs: string[]; mcp: string[] };
 
+/** Read prisma/schema.prisma → return provider string (postgresql|sqlite|mysql|...) */
+function detectPrismaProvider(root: string): string | null {
+  for (const p of ['prisma/schema.prisma', 'schema.prisma']) {
+    const full = path.join(root, p);
+    if (!fs.existsSync(full)) continue;
+    const m = fs.readFileSync(full, 'utf-8').match(/provider\s*=\s*"([^"]+)"/);
+    if (m) return m[1].toLowerCase();
+  }
+  return null;
+}
+
+/** Read drizzle.config.* → return dialect string (postgresql|sqlite|mysql) */
+function detectDrizzleDialect(root: string): string | null {
+  for (const c of ['drizzle.config.ts', 'drizzle.config.js', 'drizzle.config.mjs']) {
+    const full = path.join(root, c);
+    if (!fs.existsSync(full)) continue;
+    const src = fs.readFileSync(full, 'utf-8');
+    if (/dialect\s*:\s*['"]postgresql['"]|dialect\s*:\s*['"]pg['"]/.test(src)) return 'postgresql';
+    if (/dialect\s*:\s*['"]sqlite['"]/.test(src)) return 'sqlite';
+    if (/dialect\s*:\s*['"]mysql['"]/.test(src))  return 'mysql';
+  }
+  return null;
+}
+
+function addPostgres(stack: string[], mcp: string[]): void {
+  if (!stack.includes('postgresql')) stack.push('postgresql');
+  if (!mcp.includes('@modelcontextprotocol/server-postgres')) mcp.push('@modelcontextprotocol/server-postgres');
+}
+
+function addSqlite(stack: string[], mcp: string[]): void {
+  if (!stack.includes('sqlite')) stack.push('sqlite');
+  if (!mcp.includes('mcp-server-sqlite')) mcp.push('mcp-server-sqlite');
+}
+
 function detectStack(root: string): StackInfo {
   const stack: string[] = [];
   const docs:  string[] = [];
-  const mcp:   string[] = [];
+  // Vibe-coder baseline: filesystem is always useful for AI agents working in a codebase
+  const mcp: string[] = ['@modelcontextprotocol/server-filesystem'];
+
+  // Git repo → GitHub MCP (issue/PR management)
+  if (fs.existsSync(path.join(root, '.git')) || fs.existsSync(path.join(root, '.github'))) {
+    mcp.push('@modelcontextprotocol/server-github');
+  }
+
+  // GitLab (takes priority over GitHub when both present is unusual, but check anyway)
+  if (fs.existsSync(path.join(root, '.gitlab-ci.yml'))) {
+    mcp.push('@modelcontextprotocol/server-gitlab');
+  }
 
   // Node.js / package.json
   const pkgPath = path.join(root, 'package.json');
@@ -158,21 +203,46 @@ function detectStack(root: string): StackInfo {
         devDependencies?: Record<string, string>;
       };
       const deps = { ...pkg.dependencies, ...pkg.devDependencies };
-      if (deps['next'])               { stack.push('nextjs');     docs.push('https://nextjs.org/llms.txt'); }
-      if (deps['astro'])              { stack.push('astro');      docs.push('https://docs.astro.build/llms.txt'); }
-      if (deps['vue'])                { stack.push('vue');        docs.push('https://vuejs.org/llms.txt'); }
-      if (deps['react'] && !deps['next'] && !deps['astro']) { stack.push('react'); }
-      if (deps['express'])            { stack.push('express'); }
-      if (deps['fastify'])            { stack.push('fastify'); }
-      if (deps['typescript'] || deps['@types/node']) { stack.push('typescript'); }
-      if (deps['pg'] || deps['postgres'] || deps['@prisma/client'] || deps['drizzle-orm']) {
-        if (!stack.includes('postgresql')) { stack.push('postgresql'); mcp.push('@modelcontextprotocol/server-postgres'); }
+
+      // Frameworks
+      if (deps['next'])   { stack.push('nextjs');  docs.push('https://nextjs.org/llms.txt'); }
+      if (deps['astro'])  { stack.push('astro');   docs.push('https://docs.astro.build/llms.txt'); }
+      if (deps['vue'])    { stack.push('vue');      docs.push('https://vuejs.org/llms.txt'); }
+      if (deps['react'] && !deps['next'] && !deps['astro']) stack.push('react');
+      if (deps['express'])  stack.push('express');
+      if (deps['fastify'])  stack.push('fastify');
+      if (deps['typescript'] || deps['@types/node']) stack.push('typescript');
+      if (deps['ink']) stack.push('ink-tui');
+
+      // PostgreSQL — only explicit pg drivers
+      if (deps['pg'] || deps['postgres']) addPostgres(stack, mcp);
+
+      // Prisma — check schema for real provider
+      if (deps['@prisma/client']) {
+        stack.push('prisma');
+        const provider = detectPrismaProvider(root);
+        if (provider === 'postgresql') addPostgres(stack, mcp);
+        else if (provider === 'sqlite') addSqlite(stack, mcp);
+        else if (provider === 'mysql')  stack.push('mysql');
       }
-      if (deps['playwright'] || deps['@playwright/test']) {
-        mcp.push('@modelcontextprotocol/server-playwright');
+
+      // Drizzle — check config for real dialect
+      if (deps['drizzle-orm']) {
+        stack.push('drizzle');
+        const dialect = detectDrizzleDialect(root);
+        if (dialect === 'postgresql') addPostgres(stack, mcp);
+        else if (dialect === 'sqlite') addSqlite(stack, mcp);
+        else if (dialect === 'mysql')  stack.push('mysql');
       }
-      if (deps['ink']) { stack.push('ink-tui'); }
-    } catch { /* malformed package.json — skip */ }
+
+      // SQLite — explicit drivers
+      if (deps['better-sqlite3'] || deps['sqlite3']) addSqlite(stack, mcp);
+
+      // Browser automation — prefer @playwright/mcp (official, modern)
+      if (deps['@playwright/test'] || deps['playwright']) mcp.push('@playwright/mcp');
+      else if (deps['puppeteer'])                          mcp.push('@modelcontextprotocol/server-puppeteer');
+
+    } catch { /* malformed package.json */ }
   }
 
   // Python
@@ -185,22 +255,20 @@ function detectStack(root: string): StackInfo {
       .map(p => fs.readFileSync(p, 'utf-8'))
       .join('\n')
       .toLowerCase();
-    if (content.includes('fastapi'))  { stack.push('fastapi');  docs.push('https://fastapi.tiangolo.com/llms.txt'); }
-    if (content.includes('django'))   { stack.push('django'); }
-    if (content.includes('flask'))    { stack.push('flask'); }
-    if (content.includes('psycopg') || content.includes('asyncpg') || content.includes('sqlalchemy')) {
-      if (!stack.includes('postgresql')) { stack.push('postgresql'); mcp.push('@modelcontextprotocol/server-postgres'); }
-    }
+    if (content.includes('fastapi')) { stack.push('fastapi'); docs.push('https://fastapi.tiangolo.com/llms.txt'); }
+    if (content.includes('django'))  stack.push('django');
+    if (content.includes('flask'))   stack.push('flask');
+    // PostgreSQL — only explicit pg drivers, not sqlalchemy alone
+    if (content.includes('psycopg2') || content.includes('psycopg') || content.includes('asyncpg')) addPostgres(stack, mcp);
+    // SQLite
+    if (content.includes('aiosqlite') || content.includes('databases[sqlite')) addSqlite(stack, mcp);
+    // Playwright for Python
+    if (content.includes('playwright')) mcp.push('@playwright/mcp');
   }
 
   // Rust / Go
   if (fs.existsSync(path.join(root, 'Cargo.toml'))) stack.push('rust');
   if (fs.existsSync(path.join(root, 'go.mod')))     stack.push('go');
-
-  // GitHub Actions → GitHub MCP
-  if (fs.existsSync(path.join(root, '.github', 'workflows'))) {
-    mcp.push('@modelcontextprotocol/server-github');
-  }
 
   return {
     stack: [...new Set(stack)],
