@@ -24,6 +24,9 @@ type Config = {
   conventions_file: string;
   rules_file: string;
   baton_ttl_hours: number;
+  stack?: string[];         // detected tech stack, e.g. ["nextjs", "typescript", "postgresql"]
+  stack_docs?: string[];    // llms.txt doc URLs for the stack
+  mcp_suggested?: string[]; // recommended MCP server packages
 };
 
 type RelayDependencyValidation = {
@@ -135,6 +138,75 @@ function saveConfig(root: string, config: Config): void {
 
 function coordinationRoot(root: string, config: Config): string {
   return toAbs(root, config.coordination_dir);
+}
+
+// ─── Stack detection ──────────────────────────────────────────────────────────
+type StackInfo = { stack: string[]; docs: string[]; mcp: string[] };
+
+function detectStack(root: string): StackInfo {
+  const stack: string[] = [];
+  const docs:  string[] = [];
+  const mcp:   string[] = [];
+
+  // Node.js / package.json
+  const pkgPath = path.join(root, 'package.json');
+  if (fs.existsSync(pkgPath)) {
+    stack.push('nodejs');
+    try {
+      const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf-8')) as {
+        dependencies?: Record<string, string>;
+        devDependencies?: Record<string, string>;
+      };
+      const deps = { ...pkg.dependencies, ...pkg.devDependencies };
+      if (deps['next'])               { stack.push('nextjs');     docs.push('https://nextjs.org/llms.txt'); }
+      if (deps['astro'])              { stack.push('astro');      docs.push('https://docs.astro.build/llms.txt'); }
+      if (deps['vue'])                { stack.push('vue');        docs.push('https://vuejs.org/llms.txt'); }
+      if (deps['react'] && !deps['next'] && !deps['astro']) { stack.push('react'); }
+      if (deps['express'])            { stack.push('express'); }
+      if (deps['fastify'])            { stack.push('fastify'); }
+      if (deps['typescript'] || deps['@types/node']) { stack.push('typescript'); }
+      if (deps['pg'] || deps['postgres'] || deps['@prisma/client'] || deps['drizzle-orm']) {
+        if (!stack.includes('postgresql')) { stack.push('postgresql'); mcp.push('@modelcontextprotocol/server-postgres'); }
+      }
+      if (deps['playwright'] || deps['@playwright/test']) {
+        mcp.push('@modelcontextprotocol/server-playwright');
+      }
+      if (deps['ink']) { stack.push('ink-tui'); }
+    } catch { /* malformed package.json — skip */ }
+  }
+
+  // Python
+  const pyFiles = ['pyproject.toml', 'requirements.txt', 'requirements.in'];
+  if (pyFiles.some(f => fs.existsSync(path.join(root, f)))) {
+    stack.push('python');
+    const content = pyFiles
+      .map(f => path.join(root, f))
+      .filter(p => fs.existsSync(p))
+      .map(p => fs.readFileSync(p, 'utf-8'))
+      .join('\n')
+      .toLowerCase();
+    if (content.includes('fastapi'))  { stack.push('fastapi');  docs.push('https://fastapi.tiangolo.com/llms.txt'); }
+    if (content.includes('django'))   { stack.push('django'); }
+    if (content.includes('flask'))    { stack.push('flask'); }
+    if (content.includes('psycopg') || content.includes('asyncpg') || content.includes('sqlalchemy')) {
+      if (!stack.includes('postgresql')) { stack.push('postgresql'); mcp.push('@modelcontextprotocol/server-postgres'); }
+    }
+  }
+
+  // Rust / Go
+  if (fs.existsSync(path.join(root, 'Cargo.toml'))) stack.push('rust');
+  if (fs.existsSync(path.join(root, 'go.mod')))     stack.push('go');
+
+  // GitHub Actions → GitHub MCP
+  if (fs.existsSync(path.join(root, '.github', 'workflows'))) {
+    mcp.push('@modelcontextprotocol/server-github');
+  }
+
+  return {
+    stack: [...new Set(stack)],
+    docs:  [...new Set(docs)],
+    mcp:   [...new Set(mcp)],
+  };
 }
 
 function numericIdsFromFiles(dirPath: string, prefix: string, extension = '.md'): number[] {
@@ -371,9 +443,13 @@ function setupProject(root: string, projectName: string): void {
   ensureDir(path.join(coordination, 'archive'));
   ensureDir(path.join(coordination, 'batons'));
 
+  const detected = detectStack(root);
   const config: Config = {
     ...DEFAULT_CONFIG,
     project: projectName,
+    ...(detected.stack.length > 0  && { stack: detected.stack }),
+    ...(detected.docs.length  > 0  && { stack_docs: detected.docs }),
+    ...(detected.mcp.length   > 0  && { mcp_suggested: detected.mcp }),
   };
 
   saveConfig(root, config);
@@ -827,7 +903,30 @@ function buildPrompt(
     .map((reportPath) => `\n---\nFile: ${path.basename(reportPath)}\n${fs.readFileSync(reportPath, 'utf-8')}`)
     .join('\n');
 
-  const rawPrompt = `CONTEXT: Working with Brothers Protocol\n\nRULES:\n${rules || '[No AI_RULES.md found]'}\n\nCONVENTIONS:\n${conventions || '[No CONVENTIONS.md found]'}\n\nTASK: ${taskId}\n${taskContent}\n\nRECENT REPORTS:\n${latestReports || '[No reports yet]'}\n\nINSTRUCTION:\nComplete the task and return a report using project template.`;
+  const stackLine = config.stack?.length
+    ? `STACK: ${config.stack.join(', ')}`
+    : '';
+  const docsBlock = config.stack_docs?.length
+    ? `DOCUMENTATION (fetch these llms.txt for current API reference):\n${config.stack_docs.map(u => `- ${u}`).join('\n')}`
+    : '';
+
+  const rawPrompt = [
+    'CONTEXT: Working with Brothers Protocol',
+    '',
+    stackLine,
+    docsBlock,
+    '',
+    `RULES:\n${rules || '[No AI_RULES.md found]'}`,
+    '',
+    `CONVENTIONS:\n${conventions || '[No CONVENTIONS.md found]'}`,
+    '',
+    `TASK: ${taskId}\n${taskContent}`,
+    '',
+    `RECENT REPORTS:\n${latestReports || '[No reports yet]'}`,
+    '',
+    'INSTRUCTION:\nComplete the task and return a report using project template.',
+  ].filter(Boolean).join('\n');
+
   return { rawPrompt, sanitizedPrompt: sanitizePrompt(rawPrompt) };
 }
 
@@ -1634,6 +1733,42 @@ program
     }
   });
 
+// ─── STACK (detect and save tech stack) ────────────────────────────────────────
+program
+  .command('stack')
+  .description('Detect project tech stack and update .brothers-config.json')
+  .option('--show', 'Show current saved stack without re-detecting', false)
+  .action((options: { show: boolean }) => {
+    const root = findProjectRoot(process.cwd());
+    const config = loadConfig(root);
+
+    if (options.show) {
+      if (!config.stack?.length) {
+        console.log('No stack detected yet. Run: brothers stack');
+      } else {
+        console.log(`Stack: ${config.stack.join(', ')}`);
+        if (config.stack_docs?.length) console.log(`Docs: ${config.stack_docs.join(', ')}`);
+        if (config.mcp_suggested?.length) console.log(`Recommended MCP: ${config.mcp_suggested.join(', ')}`);
+      }
+      return;
+    }
+
+    const detected = detectStack(root);
+    config.stack         = detected.stack.length > 0 ? detected.stack : undefined;
+    config.stack_docs    = detected.docs.length  > 0 ? detected.docs  : undefined;
+    config.mcp_suggested = detected.mcp.length   > 0 ? detected.mcp   : undefined;
+    saveConfig(root, config);
+
+    if (detected.stack.length === 0) {
+      console.log('No stack detected. Place package.json / pyproject.toml / Cargo.toml in project root.');
+      return;
+    }
+    console.log(`Stack detected and saved:`);
+    console.log(`  Stack: ${detected.stack.join(', ')}`);
+    if (detected.docs.length)  console.log(`  Docs:  ${detected.docs.join('\n         ')}`);
+    if (detected.mcp.length)   console.log(`  MCP:   ${detected.mcp.join('\n         ')}`);
+  });
+
 // ─── CONTEXT (generate AI prompt without baton check) ──────────────────────────
 program
   .command('context')
@@ -1658,6 +1793,9 @@ program
     writeText(promptPath, prompt);
 
     console.log(`Context generated for ${taskId}`);
+    if (config.stack?.length) console.log(`Stack: ${config.stack.join(', ')}`);
+    if (config.stack_docs?.length) console.log(`Docs: ${config.stack_docs.join(', ')}`);
+    if (config.mcp_suggested?.length) console.log(`Recommended MCP: ${config.mcp_suggested.join(', ')}`);
     console.log(`Characters: ${prompt.length}`);
     console.log(`Prompt file: ${promptPath}`);
   });

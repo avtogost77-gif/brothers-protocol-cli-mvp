@@ -9,12 +9,14 @@ interface Props {
   tasks: Task[];
   batons: Baton[];
   project: string;
+  stack: string[];
+  mcp: string[];
   onDetail: (taskId: string) => void;
   onCreate: () => void;
   onRefresh: () => void;
 }
 
-export function TaskList({ tasks, batons, project, onDetail, onCreate, onRefresh }: Props) {
+export function TaskList({ tasks, batons, project, stack, mcp, onDetail, onCreate, onRefresh }: Props) {
   const [selected, setSelected] = useState(0);
   const { exit } = useApp();
 
@@ -39,6 +41,18 @@ export function TaskList({ tasks, batons, project, onDetail, onCreate, onRefresh
         <Text bold color="cyan">Brothers Protocol</Text>
         <Text color="gray">{project}  ·  {tasks.length} задач</Text>
       </Box>
+
+      {/* Stack + MCP info strip */}
+      {(stack.length > 0 || mcp.length > 0) && (
+        <Box paddingX={2} gap={2}>
+          {stack.length > 0 && (
+            <Text color="gray" dimColor>⬡ {stack.join(' · ')}</Text>
+          )}
+          {mcp.length > 0 && (
+            <Text color="yellow" dimColor>MCP: {mcp.map(m => m.replace('@modelcontextprotocol/server-', '')).join(', ')}</Text>
+          )}
+        </Box>
+      )}
 
       {/* Task list */}
       <Box flexDirection="column" paddingY={1} paddingX={1} minHeight={10}>

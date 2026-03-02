@@ -89,13 +89,33 @@ export function readBatons(coordDir: string): Baton[] {
     .filter(Boolean) as Baton[];
 }
 
-export function getProjectName(coordDir: string): string {
+interface BrothersConfig {
+  project?: string;
+  stack?: string[];
+  stack_docs?: string[];
+  mcp_suggested?: string[];
+}
+
+function readConfig(coordDir: string): BrothersConfig {
   try {
-    const cfg = JSON.parse(fs.readFileSync(path.join(coordDir, 'brothers-config.json'), 'utf-8'));
-    return (cfg.project as string) || path.basename(path.dirname(coordDir));
+    const cfgPath = path.join(path.dirname(coordDir), '.brothers-config.json');
+    return JSON.parse(fs.readFileSync(cfgPath, 'utf-8')) as BrothersConfig;
   } catch {
-    return path.basename(path.dirname(coordDir));
+    return {};
   }
+}
+
+export function getProjectName(coordDir: string): string {
+  const cfg = readConfig(coordDir);
+  return cfg.project || path.basename(path.dirname(coordDir));
+}
+
+export function getProjectStack(coordDir: string): string[] {
+  return readConfig(coordDir).stack ?? [];
+}
+
+export function getMcpSuggested(coordDir: string): string[] {
+  return readConfig(coordDir).mcp_suggested ?? [];
 }
 
 export function isBatonActive(baton: Baton): boolean {

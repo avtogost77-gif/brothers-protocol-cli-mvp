@@ -3,7 +3,7 @@ import { Box, Text, useInput, useApp } from 'ink';
 import { TaskList } from './screens/TaskList.js';
 import { TaskDetail } from './screens/TaskDetail.js';
 import { CreateTask } from './screens/CreateTask.js';
-import { readTasks, readBatons, getProjectName } from './lib.js';
+import { readTasks, readBatons, getProjectName, getProjectStack, getMcpSuggested } from './lib.js';
 import type { Task, Baton } from './lib.js';
 
 type Screen =
@@ -16,6 +16,8 @@ interface AppData {
   tasks: Task[];
   batons: Baton[];
   project: string;
+  stack: string[];
+  mcp: string[];
 }
 
 function load(coordDir: string): AppData {
@@ -23,6 +25,8 @@ function load(coordDir: string): AppData {
     tasks:   readTasks(coordDir),
     batons:  readBatons(coordDir),
     project: getProjectName(coordDir),
+    stack:   getProjectStack(coordDir),
+    mcp:     getMcpSuggested(coordDir),
   };
 }
 
@@ -43,6 +47,8 @@ export function App({ coordDir }: { coordDir: string }) {
         tasks={data.tasks}
         batons={data.batons}
         project={data.project}
+        stack={data.stack}
+        mcp={data.mcp}
         onDetail={id  => setScreen({ type: 'detail', taskId: id })}
         onCreate={() => setScreen({ type: 'create' })}
         onRefresh={refresh}
