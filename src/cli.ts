@@ -919,6 +919,44 @@ async function callAnthropic(prompt: string, model: string): Promise<string> {
   return content;
 }
 
+async function callClaudeCode(prompt: string): Promise<string> {
+  // Claude Code blocks nested sessions (CLAUDECODE env var is set when running inside Claude Code)
+  if (process.env.CLAUDECODE) {
+    throw new Error(
+      'Cannot call Claude Code from within a Claude Code session.\n' +
+      'Run brothers commands from a regular terminal (outside Claude Code).',
+    );
+  }
+
+  const { spawnSync } = await import('node:child_process');
+  const result = spawnSync('claude', ['--print'], {
+    input: prompt,
+    encoding: 'utf-8',
+    timeout: 120000,
+    maxBuffer: 10 * 1024 * 1024,
+  });
+
+  if (result.error) {
+    const err = result.error as NodeJS.ErrnoException;
+    if (err.code === 'ENOENT') {
+      throw new Error(
+        'claude command not found. Make sure Claude Code is installed and in PATH.\n' +
+        'Install: https://claude.ai/code',
+      );
+    }
+    throw new Error(`Claude Code error: ${err.message}`);
+  }
+
+  if (result.status !== 0) {
+    const errMsg = (result.stderr as string) || `exit code ${result.status}`;
+    throw new Error(`Claude Code failed: ${errMsg.trim()}`);
+  }
+
+  const output = (result.stdout as string) || '';
+  // Strip ANSI escape codes for clean report parsing
+  return output.replace(/\x1b\[[0-9;]*m/g, '').trim();
+}
+
 async function callAiProvider(provider: string, prompt: string, model: string | undefined, attempt: number): Promise<string> {
   const normalized = provider.toLowerCase();
 
@@ -932,8 +970,9 @@ async function callAiProvider(provider: string, prompt: string, model: string | 
 
   if (normalized === 'openai') return callOpenAI(prompt, model || 'gpt-4.1-mini');
   if (normalized === 'anthropic' || normalized === 'claude') return callAnthropic(prompt, model || 'claude-3-5-sonnet-latest');
+  if (normalized === 'claude-code') return callClaudeCode(prompt);
 
-  throw new Error(`Unsupported AI provider for --auto: ${provider}. Use one of: mock, openai, anthropic`);
+  throw new Error(`Unsupported AI provider for --auto: ${provider}. Use one of: mock, openai, anthropic, claude-code`);
 }
 
 function sleep(ms: number): Promise<void> {
@@ -1027,9 +1066,10 @@ ai
   .description('List supported auto providers')
   .action(() => {
     console.log('Supported providers:');
-    console.log('- mock');
-    console.log('- openai');
-    console.log('- anthropic');
+    console.log('- mock         (testing, no API key required)');
+    console.log('- claude-code  (uses local Claude Code session, no API key required)');
+    console.log('- openai       (requires OPENAI_API_KEY)');
+    console.log('- anthropic    (requires ANTHROPIC_API_KEY)');
   });
 
 ai
@@ -1061,8 +1101,8 @@ ai
 
     if (options.provider) {
       const normalized = options.provider.toLowerCase();
-      if (!['manual', 'mock', 'openai', 'anthropic', 'claude'].includes(normalized)) {
-        throw new Error('Unsupported provider. Use manual|mock|openai|anthropic');
+      if (!['manual', 'mock', 'openai', 'anthropic', 'claude', 'claude-code'].includes(normalized)) {
+        throw new Error('Unsupported provider. Use manual|mock|openai|anthropic|claude-code');
       }
       config.ai_provider = normalized === 'claude' ? 'anthropic' : normalized;
     }
@@ -1113,7 +1153,7 @@ ai
     const model = options.model || config.ai_model || undefined;
 
     if (provider === 'manual') {
-      throw new Error('AI provider is manual. Set provider via: brothers ai setup --provider mock|openai|anthropic');
+      throw new Error('AI provider is manual. Set provider via: brothers ai setup --provider mock|openai|anthropic|claude-code');
     }
 
     if (provider === 'mock') {
@@ -1122,6 +1162,31 @@ ai
       console.log(`provider: ${provider}`);
       if (model) console.log(`model: ${model}`);
       console.log(`response_size: ${response.length}`);
+      return;
+    }
+
+    if (provider === 'claude-code') {
+      const { spawnSync } = await import('node:child_process');
+      const check = spawnSync('claude', ['--version'], { encoding: 'utf-8' });
+      if (check.error || check.status !== 0) {
+        throw new Error(
+          'claude command not found or not working.\n' +
+          'Install Claude Code: https://claude.ai/code',
+        );
+      }
+      const version = ((check.stdout as string) || '').trim();
+      if (!options.live) {
+        console.log('AI test passed (claude command found)');
+        console.log('provider: claude-code');
+        console.log(`claude version: ${version}`);
+        console.log('Use --live to run a real call');
+        return;
+      }
+      const response = await callClaudeCode('Return exactly one word: PONG');
+      console.log('AI live test passed');
+      console.log('provider: claude-code');
+      console.log(`claude version: ${version}`);
+      console.log(`response: ${response.slice(0, 100)}`);
       return;
     }
 
