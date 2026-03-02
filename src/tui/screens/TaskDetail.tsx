@@ -1,4 +1,5 @@
 import React from 'react';
+import fs from 'node:fs';
 import { Box, Text, useInput, useApp } from 'ink';
 import { execSync } from 'node:child_process';
 import path from 'node:path';
@@ -29,6 +30,25 @@ function runCli(args: string, cwd: string): string {
   }
 }
 
+function copyToClipboard(text: string): boolean {
+  try {
+    if (process.platform === 'darwin') {
+      execSync('pbcopy', { input: text, timeout: 3000 });
+    } else if (process.platform === 'win32') {
+      execSync('clip', { input: text, timeout: 3000 });
+    } else {
+      try {
+        execSync('xclip -selection clipboard', { input: text, timeout: 3000 });
+      } catch {
+        execSync('xsel --clipboard --input', { input: text, timeout: 3000 });
+      }
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 const PRIORITY_COLOR: Record<string, string> = {
   high: 'red',
   medium: 'yellow',
@@ -42,14 +62,53 @@ export function TaskDetail({ task, batons, coordDir, onBack, onOutput }: Props) 
   const activeBaton = batons.find(b => b.toTask === task.id && isBatonActive(b));
   const expiredBaton = batons.find(b => b.toTask === task.id && isBatonExpired(b));
 
-  const hasDeps = task.dependencies.length > 0;
+  const hasDeps  = task.dependencies.length > 0;
+  const canStart = task.status === 'CREATED' && (!hasDeps || !!activeBaton);
+  const canDone  = task.status === 'IN_PROGRESS';
+  const canRelay = hasDeps;
 
   useInput((input, key) => {
     if (key.escape || input === 'b' || input === 'B') { onBack(); return; }
-    if ((input === 'c' || input === 'C') && hasDeps) {
+
+    if ((input === 's' || input === 'S') && canStart) {
+      const batonArg = activeBaton ? ` --with-baton ${activeBaton.id}` : '';
+      const output = runCli(`start ${task.id}${batonArg}`, projectDir);
+      onOutput(`start ${task.id}`, output);
+      return;
+    }
+
+    if ((input === 'd' || input === 'D') && canDone) {
+      const output = runCli(`report ${task.id} --done "Завершено" --executor "manual"`, projectDir);
+      onOutput(`report ${task.id}`, output);
+      return;
+    }
+
+    if ((input === 'c' || input === 'C') && canRelay) {
       const output = runCli(`relay-check ${task.id}`, projectDir);
       onOutput(`relay-check ${task.id}`, output);
+      return;
     }
+
+    if (input === 'x' || input === 'X') {
+      const genOutput = runCli(`context ${task.id}`, projectDir);
+      const match = genOutput.match(/Prompt file: (.+)/);
+      if (match) {
+        const promptPath = match[1]!.trim();
+        try {
+          const promptText = fs.readFileSync(promptPath, 'utf-8');
+          const ok = copyToClipboard(promptText);
+          onOutput(`context ${task.id}`, ok
+            ? `${genOutput}\n✓ Контекст скопирован в буфер обмена (${promptText.length} символов)`
+            : `${genOutput}\n⚠ Clipboard недоступен. Файл сохранён:\n${promptPath}`);
+        } catch {
+          onOutput(`context ${task.id}`, genOutput);
+        }
+      } else {
+        onOutput(`context ${task.id}`, genOutput);
+      }
+      return;
+    }
+
     if (input === 'q' || input === 'Q') exit();
   });
 
@@ -88,7 +147,6 @@ export function TaskDetail({ task, batons, coordDir, onBack, onOutput }: Props) 
           <Row label="Файлы"><Text dimColor>{task.files.join(', ')}</Text></Row>
         )}
 
-        {/* Baton status */}
         {activeBaton && (
           <Box marginTop={1} gap={1}>
             <Text color="green">⚡ Baton {activeBaton.id} активен</Text>
@@ -99,22 +157,30 @@ export function TaskDetail({ task, batons, coordDir, onBack, onOutput }: Props) 
         )}
         {expiredBaton && !activeBaton && (
           <Box marginTop={1}>
-            <Text color="red">⚠  Baton истёк. Запусти relay-check </Text>
+            <Text color="red">⚠  Baton истёк. Запусти </Text>
             <Text bold color="cyan">[C]</Text>
             <Text color="red"> для обновления.</Text>
           </Box>
         )}
-        {!activeBaton && !expiredBaton && task.dependencies.length > 0 && (
+        {!activeBaton && !expiredBaton && hasDeps && (
           <Box marginTop={1}>
-            <Text color="gray">Нет активного baton. Запусти relay-check </Text>
+            <Text color="gray">Нет активного baton — нажми </Text>
             <Text bold color="cyan">[C]</Text>
             <Text color="gray"> чтобы проверить зависимости.</Text>
+          </Box>
+        )}
+        {hasDeps && !activeBaton && task.status === 'CREATED' && (
+          <Box>
+            <Text color="gray" dimColor>  [S] недоступен — сначала разблокируй [C]</Text>
           </Box>
         )}
       </Box>
 
       <StatusBar hints={[
-        ...(hasDeps ? [{ key: 'C', label: 'relay-check' }] : []),
+        ...(canStart ? [{ key: 'S', label: 'начать' }] : []),
+        ...(canDone  ? [{ key: 'D', label: 'завершить' }] : []),
+        ...(canRelay ? [{ key: 'C', label: 'разблокировать' }] : []),
+        { key: 'X',     label: 'контекст' },
         { key: 'Esc/B', label: 'назад' },
         { key: 'Q',     label: 'выход' },
       ]} />

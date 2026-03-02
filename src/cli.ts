@@ -1634,6 +1634,34 @@ program
     }
   });
 
+// ─── CONTEXT (generate AI prompt without baton check) ──────────────────────────
+program
+  .command('context')
+  .description('Generate AI context prompt for a task without changing its status')
+  .argument('<taskId>', 'Task id, e.g. TASK-001')
+  .option('--sanitize <mode>', 'auto|on|off — whether to remove sensitive data', 'auto')
+  .action((taskId: string, options: { sanitize: string }) => {
+    const root = findProjectRoot(process.cwd());
+    const config = loadConfig(root);
+    const coordination = coordinationRoot(root, config);
+    const tasksDir = path.join(coordination, 'tasks');
+
+    const taskFile = path.join(tasksDir, `${taskId}.md`);
+    if (!fs.existsSync(taskFile)) throw new Error(`Task not found: ${taskId}`);
+    const taskContent = fs.readFileSync(taskFile, 'utf-8');
+
+    const built = buildPrompt(root, config, taskId, taskContent);
+    const sanitizeEnabled = boolFromMode(options.sanitize, config.auto_sanitize_prompt);
+    const prompt = sanitizeEnabled ? built.sanitizedPrompt : built.rawPrompt;
+
+    const promptPath = path.join(coordination, 'prompts', `${taskId}-prompt.txt`);
+    writeText(promptPath, prompt);
+
+    console.log(`Context generated for ${taskId}`);
+    console.log(`Characters: ${prompt.length}`);
+    console.log(`Prompt file: ${promptPath}`);
+  });
+
 // ─── UI (TUI dashboard) ────────────────────────────────────────────────────────
 program
   .command('ui')
