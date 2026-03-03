@@ -242,6 +242,26 @@ function detectStack(root: string): StackInfo {
       if (deps['@playwright/test'] || deps['playwright']) mcp.push('@playwright/mcp');
       else if (deps['puppeteer'])                          mcp.push('@modelcontextprotocol/server-puppeteer');
 
+      // AI stack detection (Node.js)
+      // No official MCP servers exist for AI providers yet — suggest memory+search instead
+      const aiDeps = ['openai', 'anthropic', '@anthropic-ai/sdk', '@google/generative-ai',
+                      'langchain', '@langchain/core', 'llamaindex', 'ai', 'ollama'];
+      const hasAiDep = aiDeps.some(d => !!deps[d]);
+      if (hasAiDep) {
+        if (deps['openai'])                          stack.push('openai');
+        if (deps['anthropic'] || deps['@anthropic-ai/sdk']) stack.push('anthropic');
+        if (deps['@google/generative-ai'])           stack.push('gemini');
+        if (deps['langchain'] || deps['@langchain/core']) stack.push('langchain');
+        if (deps['llamaindex'])                      stack.push('llamaindex');
+        if (deps['ai'])                              stack.push('vercel-ai-sdk');
+        if (deps['ollama'])                          stack.push('ollama');
+        // Useful MCPs when building AI solutions
+        if (!mcp.includes('@modelcontextprotocol/server-memory'))
+          mcp.push('@modelcontextprotocol/server-memory');
+        if (!mcp.includes('@modelcontextprotocol/server-brave-search'))
+          mcp.push('@modelcontextprotocol/server-brave-search');
+      }
+
     } catch { /* malformed package.json */ }
   }
 
@@ -264,6 +284,26 @@ function detectStack(root: string): StackInfo {
     if (content.includes('aiosqlite') || content.includes('databases[sqlite')) addSqlite(stack, mcp);
     // Playwright for Python
     if (content.includes('playwright')) mcp.push('@playwright/mcp');
+    // AI stack detection (Python)
+    const pyAiLibs: Record<string, string> = {
+      'openai':            'openai',
+      'anthropic':         'anthropic',
+      'google-generativeai': 'gemini',
+      'langchain':         'langchain',
+      'llama-index':       'llamaindex',
+      'llama_index':       'llamaindex',
+      'ollama':            'ollama',
+    };
+    let foundAi = false;
+    for (const [lib, label] of Object.entries(pyAiLibs)) {
+      if (content.includes(lib) && !stack.includes(label)) { stack.push(label); foundAi = true; }
+    }
+    if (foundAi) {
+      if (!mcp.includes('@modelcontextprotocol/server-memory'))
+        mcp.push('@modelcontextprotocol/server-memory');
+      if (!mcp.includes('@modelcontextprotocol/server-brave-search'))
+        mcp.push('@modelcontextprotocol/server-brave-search');
+    }
   }
 
   // Rust / Go
